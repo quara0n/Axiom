@@ -32,7 +32,7 @@ def create_app(settings=None, provider=None):
     async def lifespan(app):
         app.state.store = Store(settings.database)
         app.state.store.recover()
-        app.state.provider = provider or OpenRouter(settings.api_key)
+        app.state.provider = provider or OpenRouter(settings.api_key, max_tokens=settings.max_tokens)
         app.state.api_key = settings.api_key
         app.state.runtime = Runtime(settings, app.state.store, app.state.provider)
         yield

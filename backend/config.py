@@ -13,6 +13,7 @@ class Settings:
     database: Path = Path(".axiom/tasks.sqlite3")
     task_timeout: float = 600
     max_tool_rounds: int = 12
+    max_tokens: int = 32768
     allowed_origins: tuple[str, ...] = (
         "http://localhost:3000", "http://127.0.0.1:3000",
         "http://localhost:5173", "http://127.0.0.1:5173",
@@ -29,4 +30,5 @@ class Settings:
             database=Path(os.getenv("AXIOM_DATABASE", ".axiom/tasks.sqlite3")).absolute(),
             task_timeout=max(10, min(float(os.getenv("AXIOM_TASK_TIMEOUT", "600")), 3600)),
             max_tool_rounds=max(1, min(int(os.getenv("AXIOM_MAX_TOOL_ROUNDS", "12")), 30)),
+            max_tokens=max(1024, min(int(os.getenv("AXIOM_MAX_TOKENS", "32768")), 200000)),
         )

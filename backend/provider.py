@@ -6,8 +6,9 @@ class ProviderError(RuntimeError):
 
 
 class OpenRouter:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, max_tokens: int = 4096):
         self.api_key = api_key
+        self.max_tokens = max_tokens
         self.client = httpx.AsyncClient(
             base_url="https://openrouter.ai/api/v1", timeout=httpx.Timeout(60, connect=10),
             headers={"Authorization": f"Bearer {api_key}", "X-OpenRouter-Title": "Axiom"},
@@ -17,7 +18,7 @@ class OpenRouter:
         await self.client.aclose()
 
     async def configure_key(self, api_key: str):
-        replacement = OpenRouter(api_key)
+        replacement = OpenRouter(api_key, max_tokens=self.max_tokens)
         previous = self.client
         self.api_key, self.client = replacement.api_key, replacement.client
         await previous.aclose()
@@ -26,13 +27,18 @@ class OpenRouter:
         try:
             response = await self.client.post("/chat/completions", json={
                 "model": model, "messages": messages, "tools": tools,
-                "tool_choice": "auto", "max_tokens": 4096,
+                "tool_choice": "auto", "max_tokens": self.max_tokens,
             })
             if response.status_code >= 400:
                 # Never return provider bodies, request headers or credentials to browsers.
                 raise ProviderError(f"OpenRouter returned HTTP {response.status_code}. Check model, account balance and backend API key.")
             body = response.json()
-            return body["choices"][0]["message"]
+            choice = body["choices"][0]
+            # Keep the stop reason: an empty message caused by "length" is a truncation,
+            # not an unhelpful model, and the caller has to be able to tell them apart.
+            message = choice["message"]
+            message["finish_reason"] = choice.get("finish_reason")
+            return message
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as exc:
             raise ProviderError("OpenRouter request failed or returned an invalid response.") from exc
 

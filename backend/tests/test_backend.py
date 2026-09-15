@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import time
 
@@ -152,6 +153,26 @@ def test_read_only_agents_and_syntax_failure(tmp_path):
         workspace.call("validate_file", {"path": "main.py"}, "Tester")
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for JavaScript checks")
+def test_static_validation_covers_javascript_html_and_rejects_other_types(tmp_path):
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.call("write_file", {"path": "app.js", "content": "export const moves = [];\n"}, "Coder")
+    assert workspace.call("validate_file", {"path": "app.js"}, "Tester")["valid"] is True
+    workspace.call("write_file", {"path": "broken.js", "content": "function ( {\n"}, "Coder")
+    with pytest.raises(ValueError):
+        workspace.call("validate_file", {"path": "broken.js"}, "Tester")
+    workspace.call("write_file", {"path": "index.html", "content":
+                                  "<!doctype html><html><body><script>const board = 64;</script></body></html>"}, "Coder")
+    assert workspace.call("validate_file", {"path": "index.html"}, "Tester")["valid"] is True
+    workspace.call("write_file", {"path": "broken.html", "content":
+                                  "<!doctype html><html><body><script>const board = ;</script></body></html>"}, "Coder")
+    with pytest.raises(ValueError):
+        workspace.call("validate_file", {"path": "broken.html"}, "Tester")
+    workspace.call("write_file", {"path": "notes.txt", "content": "hello"}, "Coder")
+    with pytest.raises(ValueError):
+        workspace.call("validate_file", {"path": "notes.txt"}, "Tester")
+
+
 def test_symlink_or_junction_rejected(tmp_path):
     root, outside = tmp_path / "workspace", tmp_path / "outside"
     root.mkdir()
@@ -230,6 +251,66 @@ def test_no_tool_evidence_cannot_report_success(tmp_path):
     with TestClient(create_app(settings(tmp_path, max_tool_rounds=2), NoToolsProvider())) as client:
         task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
         assert wait_task(client, task_id)["status"] == "failed"
+
+
+def test_empty_response_is_retried_before_failing(tmp_path):
+    class FlakyCoder(MockProvider):
+        flaked = False
+
+        async def complete(self, model, messages, tools):
+            role = next(role for role in ("Planner", "Coder", "Tester", "Reviewer")
+                        if f"You are {role}." in messages[0]["content"])
+            if role == "Coder" and not any(message["role"] == "tool" for message in messages):
+                if not self.flaked:
+                    type(self).flaked = True
+                    return {"content": "   "}
+                return {"content": None, "tool_calls": [{
+                    "id": "write", "type": "function",
+                    "function": {"name": "write_file",
+                                 "arguments": json.dumps({"path": "main.py", "content": "print('hello')\n"})}}]}
+            return await super().complete(model, messages, tools)
+
+    with TestClient(create_app(settings(tmp_path), FlakyCoder())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Create hello world"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "completed", value
+        assert value["files"] == ["main.py"]
+
+
+def test_repeated_empty_responses_fail_and_name_the_model(tmp_path):
+    class EmptyProvider(MockProvider):
+        async def complete(self, model, messages, tools):
+            return {"content": None}
+
+    with TestClient(create_app(settings(tmp_path), EmptyProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run", "model": "~broken/model"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "failed"
+        assert "empty responses in a row" in value["error"]
+        assert "~broken/model" in value["error"]
+
+
+def test_response_cut_off_by_output_limit_says_so(tmp_path):
+    class TruncatingProvider(MockProvider):
+        async def complete(self, model, messages, tools):
+            self.calls.append((model, messages.copy(), tools))
+            return {"content": None, "finish_reason": "length"}
+
+    config = settings(tmp_path, max_tokens=2048)
+    with TestClient(create_app(config, TruncatingProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Write a large program"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "failed"
+        assert "output limit (2048 tokens)" in value["error"]
+        assert "AXIOM_MAX_TOKENS" in value["error"]
+
+
+def test_max_tokens_setting_is_bounded(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("AXIOM_MAX_TOKENS", "999999999")
+    assert Settings.from_env().max_tokens == 200000
+    monkeypatch.setenv("AXIOM_MAX_TOKENS", "10")
+    assert Settings.from_env().max_tokens == 1024
 
 
 def test_task_timeout(tmp_path):

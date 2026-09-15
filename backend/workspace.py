@@ -1,16 +1,87 @@
 import ast
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path, PureWindowsPath
+import shutil
 import stat
+import subprocess
+import tempfile
 
 MAX_FILE_BYTES = 128_000
 MAX_FILES = 200
 MAX_TOTAL_BYTES = 4_000_000
 
+# Files the Tester can check statically. Nothing here is executed: Python is parsed,
+# JSON is decoded, JavaScript and inline HTML scripts are parsed by `node --check`.
+CHECKABLE_SUFFIXES = (".py", ".json", ".js", ".mjs", ".cjs", ".html", ".htm")
+_JS_SUFFIXES = {".js", ".mjs", ".cjs"}
+_HTML_SUFFIXES = {".html", ".htm"}
+_SCRIPT_TYPES = {"", "module", "text/javascript", "application/javascript", "text/ecmascript",
+                 "application/ecmascript"}
+_NODE_TIMEOUT = 30
+_MAX_CHECK_OUTPUT = 600
+
+
+def _node_environment():
+    """Node needs a few system variables, but never the provider credentials."""
+    names = ("PATH", "SystemRoot", "SYSTEMROOT", "windir", "TEMP", "TMP", "TMPDIR")
+    return {name: os.environ[name] for name in names if name in os.environ}
+
+
+def _node_check(source, suffix):
+    """Parse JavaScript without running it. Returns (ok, message)."""
+    node = shutil.which("node")
+    if not node:
+        raise ValueError("JavaScript validation requires Node.js on PATH.")
+    order = (".mjs", ".cjs") if suffix == ".mjs" else (".cjs", ".mjs")
+    message = "The JavaScript parser rejected this file."
+    with tempfile.TemporaryDirectory() as folder:
+        for candidate in order:
+            target = Path(folder) / f"snippet{candidate}"
+            target.write_text(source, encoding="utf-8")
+            try:
+                result = subprocess.run([node, "--check", str(target)], capture_output=True,
+                                        text=True, timeout=_NODE_TIMEOUT, env=_node_environment(),
+                                        check=False)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise ValueError(f"JavaScript validation could not run ({type(exc).__name__}).") from exc
+            if result.returncode == 0:
+                kind = "ES module" if candidate == ".mjs" else "CommonJS"
+                return True, f"JavaScript parsed by node --check as {kind}; the code was not executed."
+            message = (result.stderr or result.stdout or message).strip()
+    return False, message[-_MAX_CHECK_OUTPUT:]
+
+
+class _InlineScripts(HTMLParser):
+    """Collect inline <script> bodies so they can be syntax checked."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.blocks = []
+        self._type = None
+        self._buffer = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            self._type = (dict(attrs).get("type") or "").strip().lower()
+            self._buffer = []
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self._type is not None:
+            self.blocks.append((self._type, "".join(self._buffer)))
+            self._type = None
+
+    def handle_data(self, data):
+        if self._type is not None:
+            self._buffer.append(data)
+
 
 class Workspace:
     """Confined file tools. Generated programs are never executed.
+
+    Validation parses source files; JavaScript and inline HTML scripts are read by
+    `node --check`, which parses without running anything.
 
     Reject symlinks/reparse points at every existing path component. This is a
     local, single-user boundary, not an OS sandbox against concurrent hostile
@@ -92,14 +163,37 @@ class Workspace:
             if target.stat().st_size > MAX_FILE_BYTES:
                 raise ValueError("File exceeds validation limit.")
             content = target.read_text(encoding="utf-8")
-            if target.suffix == ".py":
+            suffix = target.suffix.lower()
+            if suffix == ".py":
                 ast.parse(content, filename=args["path"])
                 check = "Python syntax only; code was not executed."
-            elif target.suffix == ".json":
+            elif suffix == ".json":
                 json.loads(content)
                 check = "JSON parsing only."
+            elif suffix in _JS_SUFFIXES:
+                ok, message = _node_check(content, suffix)
+                if not ok:
+                    raise ValueError(f"JavaScript syntax error: {message}")
+                check = message
+            elif suffix in _HTML_SUFFIXES:
+                scripts = _InlineScripts()
+                scripts.feed(content)
+                checked, failures = 0, []
+                for script_type, body in scripts.blocks:
+                    if script_type not in _SCRIPT_TYPES or not body.strip():
+                        continue
+                    checked += 1
+                    ok, message = _node_check(body, ".mjs" if script_type == "module" else ".js")
+                    if not ok:
+                        failures.append(message)
+                if failures:
+                    raise ValueError(f"JavaScript syntax error in an inline script: {failures[0]}")
+                note = f"{checked} inline script block(s) parsed" if checked else "no inline scripts found"
+                check = ("Markup was handed to the standard HTML parser and " + note
+                         + ". The markup itself is not validated and nothing was rendered or executed.")
             else:
-                raise ValueError("Safe validation currently supports .py and .json only.")
+                raise ValueError(
+                    "Safe validation supports .py, .json, .js, .mjs, .cjs, .html and .htm.")
             return {"path": args["path"], "valid": True, "check": check}
         raise ValueError("Unknown tool.")
 
@@ -117,7 +211,9 @@ def tools_for(role):
     tools = [
         tool_schema("list_files", "List project workspace files."),
         tool_schema("read_file", "Read a UTF-8 workspace file.", path, ["path"]),
-        tool_schema("validate_file", "Parse Python or JSON without executing code.", path, ["path"]),
+        tool_schema("validate_file",
+                    "Statically check a Python, JSON, JavaScript or HTML file without executing it.",
+                    path, ["path"]),
     ]
     if role == "Coder":
         tools.append(tool_schema("write_file", "Create or replace a UTF-8 workspace file.",
