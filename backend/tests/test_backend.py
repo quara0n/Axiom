@@ -310,10 +310,12 @@ def test_max_tokens_setting_is_bounded(monkeypatch):
     monkeypatch.setenv("AXIOM_MAX_TOKENS", "999999999")
     monkeypatch.setenv("AXIOM_REASONING_MAX_TOKENS", "999999999")
     monkeypatch.setenv("AXIOM_REQUEST_TIMEOUT", "5")
+    monkeypatch.setenv("AXIOM_MAX_TOOL_ROUNDS", "9999")
     config = Settings.from_env()
     assert config.max_tokens == 200000
     assert config.reasoning_max_tokens == 100000
     assert config.request_timeout == 30
+    assert config.max_tool_rounds == 120
     monkeypatch.setenv("AXIOM_MAX_TOKENS", "10")
     assert Settings.from_env().max_tokens == 1024
 
@@ -378,6 +380,25 @@ def test_unknown_agent_role_and_invalid_model_are_rejected(tmp_path):
             "task": "Run", "models": {"Coder": "bad model!"}}).status_code == 422
         assert client.post("/api/tasks", json={
             "task": "Run", "models": {"Coder": "   "}}).status_code == 202
+
+
+def test_rejected_tool_call_names_the_tool_and_path(tmp_path):
+    class BadPathProvider(MockProvider):
+        async def complete(self, model, messages, tools):
+            return {"content": None, "tool_calls": [{
+                "id": "bad", "type": "function",
+                "function": {"name": "read_file",
+                             "arguments": json.dumps({"path": "../outside"})}}]}
+
+    with TestClient(create_app(settings(tmp_path, max_tool_rounds=2), BadPathProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "failed"
+        rejected = [event["text"] for event in value["events"]
+                    if event["text"].startswith("Tool call rejected")]
+        assert rejected, value["events"]
+        assert "read_file" in rejected[0]
+        assert "../outside" in rejected[0]
 
 
 def test_task_timeout(tmp_path):

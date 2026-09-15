@@ -22,8 +22,10 @@ write actual complete project files with write_file, and validate supported file
 Do not merely describe implementation: write one complete file per tool call and keep
 going until the project is complete. Never reply with a plan or an explanation instead
 of a tool call. Prefer a few small, focused modules over one very large file so each
-write stays complete. Preserve existing working code. Summarize changed files and
-limitations. Keep changes within this task's workspace.""",
+write stays complete. Build only what the task asks for: no package manager files,
+build steps, servers or dependency manifests unless the task requires them. Preserve
+existing working code. Summarize changed files and limitations. Keep changes within
+this task's workspace.""",
     "Tester": COMMON + """
 You are Tester. Independently inspect the files and acceptance criteria, call
 validate_file for every Python, JSON, JavaScript and HTML file, and check edge cases
@@ -179,6 +181,7 @@ class Runtime:
                 call_id = call.get("id") if isinstance(call, dict) else None
                 if not isinstance(call_id, str):
                     raise ProviderError("OpenRouter returned an invalid tool call ID.")
+                name, args = None, {}
                 try:
                     function = call["function"]
                     name = function["name"]
@@ -197,7 +200,10 @@ class Runtime:
                     # Avoid leaking absolute paths from OS errors.
                     value["tool_failures"] = value.get("tool_failures", 0) + 1
                     result = {"error": type(exc).__name__, "message": "Tool rejected the request or validation failed. Check relative path, format, permissions and tool limits."}
-                    self.event(value, role, "Tool call rejected or validation failed.")
+                    # Name what was refused: a bare "rejected" line tells the reader nothing.
+                    path = args.get("path") if isinstance(args, dict) else None
+                    detail = " ".join(part for part in (name, path) if isinstance(part, str) and part)
+                    self.event(value, role, f"Tool call rejected: {detail or 'invalid call'} ({type(exc).__name__}).")
                 messages.append({"role": "tool", "tool_call_id": call_id,
                                  "content": json.dumps(result, ensure_ascii=False)})
         raise ProviderError(f"{role} exceeded its tool round limit.")
