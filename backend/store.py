@@ -24,11 +24,13 @@ class Store:
     def connect(self):
         return sqlite3.connect(self.path, timeout=10)
 
-    def create(self, task: str, model: str):
+    def create(self, task: str, model: str, models=None):
+        chosen = {role: models[role] for role in ROLES if models and models.get(role)}
         value = {
-            "id": uuid4().hex, "task": task, "model": model, "status": "queued",
+            "id": uuid4().hex, "task": task, "model": model, "models": chosen, "status": "queued",
             "created_at": now(), "updated_at": now(), "summary": "", "error": None,
-            "agents": [{"name": role, "status": "pending", "assignment": task, "result": ""}
+            "agents": [{"name": role, "status": "pending", "assignment": task, "result": "",
+                        "model": chosen.get(role, model)}
                        for role in ROLES], "events": [],
         }
         self.save(value)

@@ -13,12 +13,14 @@ from dotenv import set_key
 from .config import Settings
 from .provider import OpenRouter, ProviderError
 from .runtime import Runtime
-from .store import Store, TERMINAL
+from .store import ROLES, Store, TERMINAL
 
+MODEL_PATTERN = r"[A-Za-z0-9~][A-Za-z0-9_./:~-]{0,199}"
 
 class TaskRequest(BaseModel):
     task: str = Field(min_length=1, max_length=20000)
     model: str | None = Field(default=None, max_length=200)
+    models: dict[str, str] | None = None
 
 
 class ConnectionRequest(BaseModel):
@@ -99,12 +101,23 @@ def create_app(settings=None, provider=None):
         if not task:
             raise HTTPException(422, "Task cannot be blank.")
         model = body.model or settings.model
-        if not re.fullmatch(r"[A-Za-z0-9~][A-Za-z0-9_./:~-]{0,199}", model):
+        if not re.fullmatch(MODEL_PATTERN, model):
             raise HTTPException(422, "Invalid OpenRouter model ID.")
+        requested = body.models or {}
+        if any(role not in ROLES for role in requested):
+            raise HTTPException(422, "Unknown agent role in the model plan.")
+        per_agent = {}
+        for role, value in requested.items():
+            candidate = (value or "").strip()
+            if not candidate:
+                continue
+            if len(candidate) > 200 or not re.fullmatch(MODEL_PATTERN, candidate):
+                raise HTTPException(422, f"Invalid OpenRouter model ID for {role}.")
+            per_agent[role] = candidate
         runtime = request.app.state.runtime
         if len(runtime.jobs) >= 10:
             raise HTTPException(429, "Too many pending tasks. Wait or cancel a task.")
-        value = request.app.state.store.create(task, model)
+        value = request.app.state.store.create(task, model, per_agent)
         value["workspace"] = str((settings.workspace_root / value["id"]).absolute())
         value["files"] = []
         request.app.state.store.save(value)

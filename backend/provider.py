@@ -6,11 +6,19 @@ class ProviderError(RuntimeError):
 
 
 class OpenRouter:
-    def __init__(self, api_key: str, max_tokens: int = 4096):
+    def __init__(self, api_key: str, max_tokens: int = 4096, reasoning_max_tokens: int = 0,
+                 request_timeout: float = 180):
         self.api_key = api_key
         self.max_tokens = max_tokens
+        self.reasoning_max_tokens = reasoning_max_tokens
+        self.request_timeout = request_timeout
+        # A reasoning model with an unbounded budget will think until it runs out of
+        # budget instead of acting. Cap it, and drop the field for providers that
+        # reject it rather than failing the task.
+        self.reasoning_supported = reasoning_max_tokens > 0
         self.client = httpx.AsyncClient(
-            base_url="https://openrouter.ai/api/v1", timeout=httpx.Timeout(60, connect=10),
+            base_url="https://openrouter.ai/api/v1",
+            timeout=httpx.Timeout(request_timeout, connect=10),
             headers={"Authorization": f"Bearer {api_key}", "X-OpenRouter-Title": "Axiom"},
         )
 
@@ -18,17 +26,31 @@ class OpenRouter:
         await self.client.aclose()
 
     async def configure_key(self, api_key: str):
-        replacement = OpenRouter(api_key, max_tokens=self.max_tokens)
+        replacement = OpenRouter(api_key, max_tokens=self.max_tokens,
+                                 reasoning_max_tokens=self.reasoning_max_tokens,
+                                 request_timeout=self.request_timeout)
         previous = self.client
         self.api_key, self.client = replacement.api_key, replacement.client
         await previous.aclose()
 
+    async def _post(self, payload):
+        response = await self.client.post("/chat/completions", json=payload)
+        if response.status_code == 400 and "reasoning" in payload:
+            # Some providers reject the reasoning field outright; retry without it.
+            self.reasoning_supported = False
+            response = await self.client.post("/chat/completions", json={
+                key: value for key, value in payload.items() if key != "reasoning"})
+        return response
+
     async def complete(self, model, messages, tools):
         try:
-            response = await self.client.post("/chat/completions", json={
+            payload = {
                 "model": model, "messages": messages, "tools": tools,
                 "tool_choice": "auto", "max_tokens": self.max_tokens,
-            })
+            }
+            if self.reasoning_supported:
+                payload["reasoning"] = {"max_tokens": self.reasoning_max_tokens}
+            response = await self._post(payload)
             if response.status_code >= 400:
                 # Never return provider bodies, request headers or credentials to browsers.
                 raise ProviderError(f"OpenRouter returned HTTP {response.status_code}. Check model, account balance and backend API key.")

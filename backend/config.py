@@ -12,8 +12,10 @@ class Settings:
     workspace_root: Path = Path(".axiom/workspaces")
     database: Path = Path(".axiom/tasks.sqlite3")
     task_timeout: float = 600
-    max_tool_rounds: int = 12
-    max_tokens: int = 32768
+    max_tool_rounds: int = 20
+    max_tokens: int = 16384
+    reasoning_max_tokens: int = 2048
+    request_timeout: float = 180
     allowed_origins: tuple[str, ...] = (
         "http://localhost:3000", "http://127.0.0.1:3000",
         "http://localhost:5173", "http://127.0.0.1:5173",
@@ -29,6 +31,8 @@ class Settings:
             workspace_root=Path(os.getenv("AXIOM_WORKSPACE_ROOT", ".axiom/workspaces")).absolute(),
             database=Path(os.getenv("AXIOM_DATABASE", ".axiom/tasks.sqlite3")).absolute(),
             task_timeout=max(10, min(float(os.getenv("AXIOM_TASK_TIMEOUT", "600")), 3600)),
-            max_tool_rounds=max(1, min(int(os.getenv("AXIOM_MAX_TOOL_ROUNDS", "12")), 30)),
-            max_tokens=max(1024, min(int(os.getenv("AXIOM_MAX_TOKENS", "32768")), 200000)),
+            max_tool_rounds=max(1, min(int(os.getenv("AXIOM_MAX_TOOL_ROUNDS", "20")), 60)),
+            max_tokens=max(1024, min(int(os.getenv("AXIOM_MAX_TOKENS", "16384")), 200000)),
+            reasoning_max_tokens=max(0, min(int(os.getenv("AXIOM_REASONING_MAX_TOKENS", "2048")), 100000)),
+            request_timeout=max(30, min(float(os.getenv("AXIOM_REQUEST_TIMEOUT", "180")), 1800)),
         )

@@ -308,9 +308,76 @@ def test_response_cut_off_by_output_limit_says_so(tmp_path):
 def test_max_tokens_setting_is_bounded(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("AXIOM_MAX_TOKENS", "999999999")
-    assert Settings.from_env().max_tokens == 200000
+    monkeypatch.setenv("AXIOM_REASONING_MAX_TOKENS", "999999999")
+    monkeypatch.setenv("AXIOM_REQUEST_TIMEOUT", "5")
+    config = Settings.from_env()
+    assert config.max_tokens == 200000
+    assert config.reasoning_max_tokens == 100000
+    assert config.request_timeout == 30
     monkeypatch.setenv("AXIOM_MAX_TOKENS", "10")
     assert Settings.from_env().max_tokens == 1024
+
+
+def test_cut_off_response_is_retried_with_a_corrective_nudge(tmp_path):
+    class RecoveringProvider(MockProvider):
+        truncated = False
+
+        async def complete(self, model, messages, tools):
+            role = next(role for role in ("Planner", "Coder", "Tester", "Reviewer")
+                        if f"You are {role}." in messages[0]["content"])
+            if not type(self).truncated:
+                type(self).truncated = True
+                return {"content": None, "finish_reason": "length"}
+            if not any(message["role"] == "tool" for message in messages):
+                name, args = {
+                    "Planner": ("list_files", {}),
+                    "Coder": ("write_file", {"path": "main.py", "content": "print('hello')\n"}),
+                    "Tester": ("validate_file", {"path": "main.py"}),
+                    "Reviewer": ("read_file", {"path": "main.py"}),
+                }[role]
+                return {"content": None, "tool_calls": [{
+                    "id": role, "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)}}]}
+            result = f"{role} complete; static checks only."
+            return {"content": json.dumps({"verdict": "approved", "summary": result})
+                    if role == "Reviewer" else result}
+
+    with TestClient(create_app(settings(tmp_path), RecoveringProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Create hello world"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "completed", value
+        assert value["files"] == ["main.py"]
+
+
+def test_each_agent_can_use_its_own_model(tmp_path):
+    provider = MockProvider()
+    with TestClient(create_app(settings(tmp_path), provider)) as client:
+        response = client.post("/api/tasks", json={
+            "task": "Create hello world", "model": "test/default",
+            "models": {"Planner": "~planner/model", "Coder": "coder/model", "Tester": ""}})
+        assert response.status_code == 202
+        value = wait_task(client, response.json()["id"])
+        assert value["status"] == "completed", value
+        assert value["models"] == {"Planner": "~planner/model", "Coder": "coder/model"}
+        assert [agent["model"] for agent in value["agents"]] == [
+            "~planner/model", "coder/model", "test/default", "test/default"]
+        used = {}
+        for model, messages, _ in provider.calls:
+            role = next(role for role in ("Planner", "Coder", "Tester", "Reviewer")
+                        if f"You are {role}." in messages[0]["content"])
+            used[role] = model
+        assert used == {"Planner": "~planner/model", "Coder": "coder/model",
+                        "Tester": "test/default", "Reviewer": "test/default"}
+
+
+def test_unknown_agent_role_and_invalid_model_are_rejected(tmp_path):
+    with TestClient(create_app(settings(tmp_path), MockProvider())) as client:
+        assert client.post("/api/tasks", json={
+            "task": "Run", "models": {"Coder2": "x/y"}}).status_code == 422
+        assert client.post("/api/tasks", json={
+            "task": "Run", "models": {"Coder": "bad model!"}}).status_code == 422
+        assert client.post("/api/tasks", json={
+            "task": "Run", "models": {"Coder": "   "}}).status_code == 202
 
 
 def test_task_timeout(tmp_path):

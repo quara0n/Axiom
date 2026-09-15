@@ -19,9 +19,11 @@ names, requirements, acceptance criteria and testing approach. Do not write file
     "Coder": COMMON + """
 You are Coder. Implement the user's task using the Planner's plan. Inspect files,
 write actual complete project files with write_file, and validate supported files.
-Do not merely describe implementation. Prefer a few small, focused modules over one
-very large file so each write stays complete. Preserve existing working code.
-Summarize changed files and limitations. Keep changes within this task's workspace.""",
+Do not merely describe implementation: write one complete file per tool call and keep
+going until the project is complete. Never reply with a plan or an explanation instead
+of a tool call. Prefer a few small, focused modules over one very large file so each
+write stays complete. Preserve existing working code. Summarize changed files and
+limitations. Keep changes within this task's workspace.""",
     "Tester": COMMON + """
 You are Tester. Independently inspect the files and acceptance criteria, call
 validate_file for every Python, JSON, JavaScript and HTML file, and check edge cases
@@ -59,6 +61,11 @@ class Runtime:
                 agent["status"] = status if status == "cancelled" else "failed"
         self.event(value, "System", error or "Task cancelled.")
 
+    @staticmethod
+    def model_for(value, role):
+        """Each agent can run its own model; the task model is the fallback."""
+        return (value.get("models") or {}).get(role) or value["model"]
+
     async def run(self, value):
         try:
             async with self.semaphore:
@@ -70,7 +77,7 @@ class Runtime:
                     for agent in value["agents"]:
                         role = agent["name"]
                         agent["status"] = "running"
-                        self.event(value, role, "Started")
+                        self.event(value, role, "Started with " + self.model_for(value, role))
                         agent["result"] = await self.run_agent(value, role, workspace, previous)
                         previous[role] = agent["result"]
                         agent["status"] = "completed"
@@ -102,14 +109,15 @@ class Runtime:
             # Do not log user files, provider bodies or credentials.
 
     async def run_agent(self, value, role, workspace, previous):
+        model = self.model_for(value, role)
         messages = [
             {"role": "system", "content": INSTRUCTIONS[role]},
             {"role": "user", "content": json.dumps({"task": value["task"], "prior_results": previous})},
         ]
         successful_tools = set()
-        nudges = {"empty": 0, "evidence": 0}
+        nudges = {"empty": 0, "evidence": 0, "truncated": 0}
         for _ in range(self.settings.max_tool_rounds):
-            message = await self.provider.complete(value["model"], messages, tools_for(role))
+            message = await self.provider.complete(model, messages, tools_for(role))
             if not isinstance(message, dict):
                 raise ProviderError("OpenRouter returned an invalid assistant message.")
             calls = message.get("tool_calls") or []
@@ -125,18 +133,26 @@ class Runtime:
             if not calls:
                 if not content or not content.strip():
                     if message.get("finish_reason") == "length":
-                        # Retrying at the same ceiling cannot help; say what actually happened.
-                        raise ProviderError(
-                            f"{role} was cut off at the output limit ({self.settings.max_tokens} "
-                            f"tokens) while using {value['model']}. Raise AXIOM_MAX_TOKENS or ask for "
-                            "smaller files.")
+                        # A reasoning model that runs out of budget mid-thought can be pulled
+                        # back once by forbidding any more deliberation. A second cut-off is a
+                        # configuration problem, and then we say exactly that.
+                        nudges["truncated"] += 1
+                        if nudges["truncated"] > 1:
+                            raise ProviderError(
+                                f"{role} was cut off at the output limit ({self.settings.max_tokens} "
+                                f"tokens) while using {model}. Raise AXIOM_MAX_TOKENS or lower "
+                                "AXIOM_REASONING_MAX_TOKENS.")
+                        messages.append({"role": "user", "content": (
+                            "Your previous response was cut off before any tool call. Do not explain "
+                            "or plan. Reply with exactly one tool call now.")})
+                        continue
                     # Cheap and experimental models do return empty completions. Give the agent a
                     # bounded chance to recover instead of failing the whole task on the first one.
                     nudges["empty"] += 1
                     if nudges["empty"] > 2:
                         raise ProviderError(
                             f"{role} returned {nudges['empty']} empty responses in a row while using "
-                            f"{value['model']}. Choose a different model for this task.")
+                            f"{model}. Choose a different model for this task.")
                     messages.append({"role": "user", "content": (
                         "Your last message was empty. Continue the task: use the workspace tools to "
                         "obtain evidence, and write the required files with write_file.")})
@@ -146,7 +162,7 @@ class Runtime:
                     if nudges["evidence"] > 3:
                         raise ProviderError(
                             f"{role} finished without using the required workspace tools while using "
-                            f"{value['model']}.")
+                            f"{model}.")
                     messages.append({"role": "user", "content": "Use the workspace tools to obtain real evidence before finishing. Coder must write actual files."})
                     continue
                 if role == "Reviewer":

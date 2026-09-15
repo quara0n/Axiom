@@ -2,8 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Activity, Bot, Braces, Check, ChevronDown, FlaskConical, Network, Play, Settings, ShieldCheck, Sparkles, X } from "lucide-react";
 type AgentState = "idle" | "working" | "done" | "failed" | "cancelled";
-type WorkStep = { agent:string; assignment:string; result:string };
-type Task = { id:string; status:string; workspace?:string; files?:string[]; summary:string; error?:string; agents:Array<{name:string;status:string;assignment:string;result:string}>; events:Array<{agent:string;text:string;at:string}> };
+type WorkStep = { agent:string; assignment:string; result:string; model?:string };
+type Task = { id:string; status:string; workspace?:string; files?:string[]; summary:string; error?:string; agents:Array<{name:string;status:string;assignment:string;result:string;model?:string}>; events:Array<{agent:string;text:string;at:string}> };
 const agents = [
  {name:"Planner",role:"Plans the work",icon:Network},
  {name:"Coder",role:"Builds the solution",icon:Braces},
@@ -27,6 +27,7 @@ export default function Home(){
  const [settingsOpen,setSettingsOpen]=useState(false);
  const [connected,setConnected]=useState(false);
  const [model,setModel]=useState("");
+ const [agentModels,setAgentModels]=useState<Record<string,string>>({});
  const [models,setModels]=useState<Array<{id:string;name:string}>>([]);
  const [apiKey,setApiKey]=useState("");
  const [settingsError,setSettingsError]=useState("");
@@ -40,7 +41,7 @@ export default function Home(){
  function applyTask(data:Task){
   setWorkspace(data.workspace||"");setFiles(data.files||[]);setTaskId(data.id); setRunning(["queued","running"].includes(data.status));setComplete(data.status==="completed");
   setStates(Object.fromEntries(data.agents.map(a=>[a.name,({pending:"idle",running:"working",completed:"done",failed:"failed",cancelled:"cancelled"} as Record<string,AgentState>)[a.status]||"idle"])));
-  setWorkflow(data.agents.map(a=>({agent:a.name,assignment:a.assignment,result:a.result})));
+  setWorkflow(data.agents.map(a=>({agent:a.name,assignment:a.assignment,result:a.result,model:a.model})));
   setEvents([...data.events].reverse());setSummary(data.summary||"");setError(data.error||"");
  }
  useEffect(()=>{if(settingsOpen&&connected)void api<{models:Array<{id:string;name:string}>}>("models").then(data=>{setModels(data.models);setSettingsError("");}).catch(e=>setSettingsError(e instanceof Error?e.message:"Could not load models"));},[settingsOpen,connected]);
@@ -51,6 +52,7 @@ export default function Home(){
  useEffect(()=>{
   // Remove credentials left by the previous browser-based integration.
   sessionStorage.removeItem("axiom-openrouter-key");
+  try{const saved=localStorage.getItem("axiom-agent-models");if(saved)setAgentModels(JSON.parse(saved) as Record<string,string>);}catch{setAgentModels({});}
   void api<{configured:boolean;workspace:string;model:string}>("health").then(health=>{setConnected(health.configured);setWorkspace(health.workspace);setModel(current=>current||localStorage.getItem("axiom-model")||health.model);}).catch(e=>{setConnected(false);setError(e instanceof Error?e.message:"Backend unavailable");});
   let alive=true;
   void api<{tasks:Task[]}>("tasks").then(data=>{if(!alive||activeId.current)return;setHistory(data.tasks);const saved=localStorage.getItem("axiom-task-id");const current=data.tasks.find(t=>t.id===saved)||data.tasks.find(t=>["queued","running"].includes(t.status));if(current){activeId.current=current.id;applyTask(current);}}).catch(()=>{});
@@ -68,6 +70,7 @@ export default function Home(){
    if(apiKey.trim()){await api("connection",{method:"POST",body:JSON.stringify({api_key:apiKey.trim()})});setApiKey("");setConnected(true);}
    else if(!connected)throw new Error("Enter your OpenRouter API key to connect.");
    localStorage.setItem("axiom-model",model.trim());
+   localStorage.setItem("axiom-agent-models",JSON.stringify(agentModels));
    await refreshHealth();setSettingsOpen(false);setError("");
   }catch(e){setSettingsError(e instanceof Error?e.message:"Could not save connection");}
   finally{setSavingSettings(false);}
@@ -76,7 +79,8 @@ export default function Home(){
   if(!task.trim()||running)return;
   if(!connected){setError("Add an OpenRouter API key in LLM settings before running this task.");setSettingsError("");setSettingsOpen(true);return;}
   activeId.current="creating";setTaskId(null);setFiles([]);setRunning(true);setComplete(false);setError("");setEvents([]);setWorkflow([]);setSummary("");
-  try{const data=await api<Task>("tasks",{method:"POST",body:JSON.stringify({task,model:model.trim()||undefined})});activeId.current=data.id;localStorage.setItem("axiom-task-id",data.id);applyTask(data);}
+  const perAgent=Object.fromEntries(Object.entries(agentModels).filter(([,value])=>value));
+  try{const data=await api<Task>("tasks",{method:"POST",body:JSON.stringify({task,model:model.trim()||undefined,models:Object.keys(perAgent).length?perAgent:undefined})});activeId.current=data.id;localStorage.setItem("axiom-task-id",data.id);applyTask(data);}
   catch(e){setRunning(false);setError(e instanceof Error?e.message:"Could not start task");}
  }
  async function cancelTask(){if(!taskId)return;try{applyTask(await api<Task>("tasks/"+taskId+"/cancel",{method:"POST"}));}catch(e){setError(e instanceof Error?e.message:"Could not cancel task");}}
@@ -88,12 +92,12 @@ export default function Home(){
       <div className="page-heading"><div><p className="eyebrow">Axiom workspace</p><h1>Control room</h1></div><div className="system-status"><span/> {running?"Agents working":connected?"Backend ready":"Setup required"}</div></div>
       <section className="task-card" id="task"><div className="task-label"><Sparkles size={15}/> New task</div><textarea value={task} onChange={e=>setTask(e.target.value)} placeholder="What should the agents work on?" aria-label="Task description" rows={3}/>{error&&<div className="error-message">{error}</div>}<div className="task-footer"><span>Planner → Coder → Tester → Reviewer</span><button className="run-button" onClick={runTask} disabled={running||!task.trim()}>{running?<><span className="spinner"/> Running</>:<><Play size={15} fill="currentColor"/> Run task</>}</button>{running&&<button className="cancel-button" onClick={()=>void cancelTask()}>Cancel</button>}</div></section>
       <div className="section-title"><div><p className="eyebrow">Team</p><h2>Agent workspace</h2></div><span>{running?(workflow.length?`${workflow.length} agents selected`:"Starting task"):complete?"Task complete":"Standing by"}</span></div>
-      <div className="agent-grid">{agents.map(({name,role,icon:Icon})=>{const state=states[name];return <article className={`agent-card ${state}`} key={name}><div className="agent-top"><span className="agent-icon"><Icon size={18}/></span><span className={`state-dot ${state}`}/></div><h3>{name}</h3><p>{role}</p><div className="agent-state">{state==="working"?"Working now":state==="done"?<><Check size={13}/> Complete</>:state==="failed"?"Failed":state==="cancelled"?"Cancelled":"Waiting"}</div></article>})}</div>
+      <div className="agent-grid">{agents.map(({name,role,icon:Icon})=>{const state=states[name];const used=workflow.find(step=>step.agent===name)?.model;return <article className={`agent-card ${state}`} key={name}><div className="agent-top"><span className="agent-icon"><Icon size={18}/></span><span className={`state-dot ${state}`}/></div><h3>{name}</h3><p>{role}</p><small className="agent-model" title={used||""}>{used||""}</small><div className="agent-state">{state==="working"?"Working now":state==="done"?<><Check size={13}/> Complete</>:state==="failed"?"Failed":state==="cancelled"?"Cancelled":"Waiting"}</div></article>})}</div>
       <div className="lower-grid" id="activity">
         <section className="panel"><div className="panel-heading"><div><p className="eyebrow">Live</p><h2>Activity</h2></div><span className="event-count">{events.length}</span></div><div className="event-list" aria-live="polite">{events.length===0?<div className="empty-state"><Activity size={21}/><p>Activity appears here when you run a task.</p></div>:events.map((event,index)=><div className="event" key={event.agent+index}><span className="event-line"/><div><strong>{event.agent}</strong><p>{event.text}</p></div><time>{event.at?new Date(event.at).toLocaleTimeString():""}</time></div>)}</div></section>
         <section className="panel"><div className="panel-heading"><div><p className="eyebrow CC">Results</p><h2>Agent output</h2></div>{complete&&<span className="success-pill"><Check size={13}/> Ready</span>}</div>{workflow.length?<div className="output-ready"><div className="output-icon"><Network size={20}/></div><h3>{summary||"Task in progress"}</h3><p className="workspace-path">{workspace}</p>{files.length>0&&<ul className="generated-files">{files.map(file=><li key={file}>{file}</li>)}</ul>}<div className="workflow-list">{workflow.map((step,index)=><div className="workflow-step" key={step.agent}><span>{index+1}</span><div><strong>{step.agent}</strong><small>{step.assignment}</small>{step.result&&<pre className="agent-result">{step.result}</pre>}</div></div>)}</div></div>:<div className="empty-state"><Bot size={22}/><p>Agent results and verification reports will appear here.</p></div>}</section>
       </div>
     </section>
-    {settingsOpen&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setSettingsOpen(false)}}><section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><button className="modal-close" aria-label="Close" onClick={()=>setSettingsOpen(false)}><X size={18}/></button><p className="eyebrow">Backend connection</p><h2 id="settings-title">OpenRouter</h2><p className="modal-copy">Enter your API key to connect the local backend. It is saved in the backend&apos;s ignored .env file and never stored in this browser.</p><label>OpenRouter API key<input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder={connected?"Key configured — enter a new key to replace it":"Paste your API key"} autoComplete="off"/></label><p className="modal-copy">{connected?"Backend key configured":"Backend key not configured"}</p><label>Available models<select value={models.some(option=>option.id===model)?model:""} onChange={e=>setModel(e.target.value)} disabled={!connected}><option value="">{connected?"Custom or backend default":"Connect a key to load models"}</option>{models.map(option=><option value={option.id} key={option.id}>{option.name}</option>)}</select></label><label>OpenRouter model ID<input value={model} onChange={e=>setModel(e.target.value)} placeholder="Use backend default" autoComplete="off"/></label><p className="modal-copy">Use a model that supports tool calling. The selected model runs each agent.</p>{settingsError&&<p className="error-message" role="alert">{settingsError}</p>}<button className="connect-button" onClick={()=>void saveConnection()} disabled={savingSettings}>{savingSettings?"Saving connection…":"Save connection"}</button></section></div>}
+    {settingsOpen&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setSettingsOpen(false)}}><section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><button className="modal-close" aria-label="Close" onClick={()=>setSettingsOpen(false)}><X size={18}/></button><p className="eyebrow">Backend connection</p><h2 id="settings-title">OpenRouter</h2><p className="modal-copy">Enter your API key to connect the local backend. It is saved in the backend&apos;s ignored .env file and never stored in this browser.</p><label>OpenRouter API key<input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder={connected?"Key configured — enter a new key to replace it":"Paste your API key"} autoComplete="off"/></label><p className="modal-copy">{connected?"Backend key configured":"Backend key not configured"}</p><label>Available models<select value={models.some(option=>option.id===model)?model:""} onChange={e=>setModel(e.target.value)} disabled={!connected}><option value="">{connected?"Custom or backend default":"Connect a key to load models"}</option>{models.map(option=><option value={option.id} key={option.id}>{option.name}</option>)}</select></label><label>OpenRouter model ID<input value={model} onChange={e=>setModel(e.target.value)} placeholder="Use backend default" autoComplete="off"/></label><p className="modal-copy">Use models that support tool calling. The default runs every agent unless you override it below.</p><div className="agent-models"><p className="eyebrow">Model per agent</p>{agents.map(({name})=><label key={name}>{name}<select value={agentModels[name]||""} onChange={e=>setAgentModels(current=>({...current,[name]:e.target.value}))} disabled={!connected}><option value="">Use default model</option>{models.map(option=><option value={option.id} key={option.id}>{option.name}</option>)}</select></label>)}</div>{settingsError&&<p className="error-message" role="alert">{settingsError}</p>}<button className="connect-button" onClick={()=>void saveConnection()} disabled={savingSettings}>{savingSettings?"Saving connection…":"Save connection"}</button></section></div>}
   </main>;
 }
