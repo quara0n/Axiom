@@ -28,6 +28,9 @@ export default function Home(){
  const [connected,setConnected]=useState(false);
  const [model,setModel]=useState("");
  const [models,setModels]=useState<Array<{id:string;name:string}>>([]);
+ const [apiKey,setApiKey]=useState("");
+ const [settingsError,setSettingsError]=useState("");
+ const [savingSettings,setSavingSettings]=useState(false);
  const [error,setError]=useState("");
  const [taskId,setTaskId]=useState<string|null>(null);
  const [history,setHistory]=useState<Task[]>([]);
@@ -40,7 +43,7 @@ export default function Home(){
   setWorkflow(data.agents.map(a=>({agent:a.name,assignment:a.assignment,result:a.result})));
   setEvents([...data.events].reverse());setSummary(data.summary||"");setError(data.error||"");
  }
- useEffect(()=>{if(settingsOpen)void api<{models:Array<{id:string;name:string}>}>("models").then(data=>setModels(data.models)).catch(()=>{});},[settingsOpen]);
+ useEffect(()=>{if(settingsOpen&&connected)void api<{models:Array<{id:string;name:string}>}>("models").then(data=>{setModels(data.models);setSettingsError("");}).catch(e=>setSettingsError(e instanceof Error?e.message:"Could not load models"));},[settingsOpen,connected]);
  async function refreshHealth(){
   try {const health=await api<{configured:boolean;workspace:string;model:string}>("health");setConnected(health.configured);setWorkspace(health.workspace);setModel(current=>current||localStorage.getItem("axiom-model")||health.model);}
   catch(e){setConnected(false);setError(e instanceof Error?e.message:"Backend unavailable");}
@@ -48,7 +51,7 @@ export default function Home(){
  useEffect(()=>{
   // Remove credentials left by the previous browser-based integration.
   sessionStorage.removeItem("axiom-openrouter-key");
-  void refreshHealth();
+  void api<{configured:boolean;workspace:string;model:string}>("health").then(health=>{setConnected(health.configured);setWorkspace(health.workspace);setModel(current=>current||localStorage.getItem("axiom-model")||health.model);}).catch(e=>{setConnected(false);setError(e instanceof Error?e.message:"Backend unavailable");});
   let alive=true;
   void api<{tasks:Task[]}>("tasks").then(data=>{if(!alive||activeId.current)return;setHistory(data.tasks);const saved=localStorage.getItem("axiom-task-id");const current=data.tasks.find(t=>t.id===saved)||data.tasks.find(t=>["queued","running"].includes(t.status));if(current){activeId.current=current.id;applyTask(current);}}).catch(()=>{});
   return()=>{alive=false;};
@@ -59,9 +62,19 @@ export default function Home(){
   const poll=async()=>{try{const data=await api<Task>("tasks/"+taskId);if(stopped||activeId.current!==taskId)return;applyTask(data);if(!["queued","running"].includes(data.status)){void api<{tasks:Task[]}>("tasks").then(d=>setHistory(d.tasks)).catch(()=>{});return;}}catch(e){if(!stopped)setError((e instanceof Error?e.message:"Connection interrupted")+" — retrying status check.");}if(!stopped)timer=setTimeout(poll,1200);};
   void poll();return()=>{stopped=true;clearTimeout(timer);};
  },[taskId,running]);
- function saveConnection(){localStorage.setItem("axiom-model",model.trim());setSettingsOpen(false);void refreshHealth();}
+ async function saveConnection(){
+  setSavingSettings(true);setSettingsError("");
+  try{
+   if(apiKey.trim()){await api("connection",{method:"POST",body:JSON.stringify({api_key:apiKey.trim()})});setApiKey("");setConnected(true);}
+   else if(!connected)throw new Error("Enter your OpenRouter API key to connect.");
+   localStorage.setItem("axiom-model",model.trim());
+   await refreshHealth();setSettingsOpen(false);setError("");
+  }catch(e){setSettingsError(e instanceof Error?e.message:"Could not save connection");}
+  finally{setSavingSettings(false);}
+ }
  async function runTask(){
   if(!task.trim()||running)return;
+  if(!connected){setError("Add an OpenRouter API key in LLM settings before running this task.");setSettingsError("");setSettingsOpen(true);return;}
   activeId.current="creating";setTaskId(null);setFiles([]);setRunning(true);setComplete(false);setError("");setEvents([]);setWorkflow([]);setSummary("");
   try{const data=await api<Task>("tasks",{method:"POST",body:JSON.stringify({task,model:model.trim()||undefined})});activeId.current=data.id;localStorage.setItem("axiom-task-id",data.id);applyTask(data);}
   catch(e){setRunning(false);setError(e instanceof Error?e.message:"Could not start task");}
@@ -73,7 +86,7 @@ export default function Home(){
     <aside className="sidebar"><p className="eyebrow">Workspace</p><button className="project-switcher"><span className="project-icon">I</span><span><strong>Axiom</strong><small>4 agents</small></span><ChevronDown size={16}/></button><nav aria-label="Project navigation"><a className="nav-item active" href="#task"><Bot size={17}/> Control room</a><a className="nav-item" href="#activity"><Activity size={17}/> Activity</a></nav><div className="sidebar-bottom"><p className="eyebrow">Recent tasks</p>{history.slice(0,8).map(item=><button key={item.id} className="history-task" disabled={running} onClick={()=>void selectTask(item.id)}><strong>{item.summary||item.id.slice(0,8)}</strong><small>{item.status}</small></button>)}</div></aside>
     <section className="workspace">
       <div className="page-heading"><div><p className="eyebrow">Axiom workspace</p><h1>Control room</h1></div><div className="system-status"><span/> {running?"Agents working":connected?"Backend ready":"Setup required"}</div></div>
-      <section className="task-card" id="task"><div className="task-label"><Sparkles size={15}/> New task</div><textarea value={task} onChange={e=>setTask(e.target.value)} placeholder="What should the agents work on?" aria-label="Task description" rows={3}/>{error&&<div className="error-message">{error}</div>}<div className="task-footer"><span>Planner → Coder → Tester → Reviewer</span><button className="run-button" onClick={runTask} disabled={running||!task.trim()||!connected}>{running?<><span className="spinner"/> Running</>:<><Play size={15} fill="currentColor"/> Run task</>}</button>{running&&<button className="cancel-button" onClick={()=>void cancelTask()}>Cancel</button>}</div></section>
+      <section className="task-card" id="task"><div className="task-label"><Sparkles size={15}/> New task</div><textarea value={task} onChange={e=>setTask(e.target.value)} placeholder="What should the agents work on?" aria-label="Task description" rows={3}/>{error&&<div className="error-message">{error}</div>}<div className="task-footer"><span>Planner → Coder → Tester → Reviewer</span><button className="run-button" onClick={runTask} disabled={running||!task.trim()}>{running?<><span className="spinner"/> Running</>:<><Play size={15} fill="currentColor"/> Run task</>}</button>{running&&<button className="cancel-button" onClick={()=>void cancelTask()}>Cancel</button>}</div></section>
       <div className="section-title"><div><p className="eyebrow">Team</p><h2>Agent workspace</h2></div><span>{running?(workflow.length?`${workflow.length} agents selected`:"Starting task"):complete?"Task complete":"Standing by"}</span></div>
       <div className="agent-grid">{agents.map(({name,role,icon:Icon})=>{const state=states[name];return <article className={`agent-card ${state}`} key={name}><div className="agent-top"><span className="agent-icon"><Icon size={18}/></span><span className={`state-dot ${state}`}/></div><h3>{name}</h3><p>{role}</p><div className="agent-state">{state==="working"?"Working now":state==="done"?<><Check size={13}/> Complete</>:state==="failed"?"Failed":state==="cancelled"?"Cancelled":"Waiting"}</div></article>})}</div>
       <div className="lower-grid" id="activity">
@@ -81,6 +94,6 @@ export default function Home(){
         <section className="panel"><div className="panel-heading"><div><p className="eyebrow CC">Results</p><h2>Agent output</h2></div>{complete&&<span className="success-pill"><Check size={13}/> Ready</span>}</div>{workflow.length?<div className="output-ready"><div className="output-icon"><Network size={20}/></div><h3>{summary||"Task in progress"}</h3><p className="workspace-path">{workspace}</p>{files.length>0&&<ul className="generated-files">{files.map(file=><li key={file}>{file}</li>)}</ul>}<div className="workflow-list">{workflow.map((step,index)=><div className="workflow-step" key={step.agent}><span>{index+1}</span><div><strong>{step.agent}</strong><small>{step.assignment}</small>{step.result&&<pre className="agent-result">{step.result}</pre>}</div></div>)}</div></div>:<div className="empty-state"><Bot size={22}/><p>Agent results and verification reports will appear here.</p></div>}</section>
       </div>
     </section>
-    {settingsOpen&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setSettingsOpen(false)}}><section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><button className="modal-close" aria-label="Close" onClick={()=>setSettingsOpen(false)}><X size={18}/></button><p className="eyebrow">Backend connection</p><h2 id="settings-title">OpenRouter</h2><p className="modal-copy">Set OPENROUTER_API_KEY in the backend .env file, then restart the backend. Keys are never stored in this browser.</p><p>{connected?"Backend key configured":"Backend key not configured"}</p><label>Available models<select value={models.some(option=>option.id===model)?model:""} onChange={e=>setModel(e.target.value)}><option value="">Custom or backend default</option>{models.map(option=><option value={option.id} key={option.id}>{option.name}</option>)}</select></label><label>OpenRouter model ID<input value={model} onChange={e=>setModel(e.target.value)} placeholder="Use backend default" autoComplete="off"/></label><p className="modal-copy">Use a model that supports tool calling. The selected model runs each agent.</p><button className="connect-button" onClick={saveConnection}>Save model and check connection</button></section></div>}
+    {settingsOpen&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setSettingsOpen(false)}}><section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><button className="modal-close" aria-label="Close" onClick={()=>setSettingsOpen(false)}><X size={18}/></button><p className="eyebrow">Backend connection</p><h2 id="settings-title">OpenRouter</h2><p className="modal-copy">Enter your API key to connect the local backend. It is saved in the backend&apos;s ignored .env file and never stored in this browser.</p><label>OpenRouter API key<input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder={connected?"Key configured — enter a new key to replace it":"Paste your API key"} autoComplete="off"/></label><p className="modal-copy">{connected?"Backend key configured":"Backend key not configured"}</p><label>Available models<select value={models.some(option=>option.id===model)?model:""} onChange={e=>setModel(e.target.value)} disabled={!connected}><option value="">{connected?"Custom or backend default":"Connect a key to load models"}</option>{models.map(option=><option value={option.id} key={option.id}>{option.name}</option>)}</select></label><label>OpenRouter model ID<input value={model} onChange={e=>setModel(e.target.value)} placeholder="Use backend default" autoComplete="off"/></label><p className="modal-copy">Use a model that supports tool calling. The selected model runs each agent.</p>{settingsError&&<p className="error-message" role="alert">{settingsError}</p>}<button className="connect-button" onClick={()=>void saveConnection()} disabled={savingSettings}>{savingSettings?"Saving connection…":"Save connection"}</button></section></div>}
   </main>;
 }

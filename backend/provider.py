@@ -16,6 +16,12 @@ class OpenRouter:
     async def close(self):
         await self.client.aclose()
 
+    async def configure_key(self, api_key: str):
+        replacement = OpenRouter(api_key)
+        previous = self.client
+        self.api_key, self.client = replacement.api_key, replacement.client
+        await previous.aclose()
+
     async def complete(self, model, messages, tools):
         try:
             response = await self.client.post("/chat/completions", json={

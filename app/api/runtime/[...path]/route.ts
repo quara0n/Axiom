@@ -7,7 +7,7 @@ async function proxy(request:Request, context:{params:Promise<{path:string[]}>})
  if(origin&&origin!==url.origin)return NextResponse.json({error:"Cross-origin requests are not allowed."},{status:403});
  const {path}=await context.params;
  const route=path.join("/");
- if(!new RegExp("^(health|models|tasks(?:/[a-zA-Z0-9-]+(?:/cancel)?)?)$").test(route))return NextResponse.json({error:"Unknown runtime route"},{status:404});
+ if(!new RegExp("^(health|models|connection|tasks(?:/[a-zA-Z0-9-]+(?:/cancel)?)?)$").test(route))return NextResponse.json({error:"Unknown runtime route"},{status:404});
  const target=new URL(process.env.AXIOM_BACKEND_URL||"http://127.0.0.1:8000");
  if(target.protocol!=="http:"||!["localhost","127.0.0.1","[::1]"].includes(target.hostname))return NextResponse.json({error:"AXIOM_BACKEND_URL must be a loopback HTTP address."},{status:503});
  try{

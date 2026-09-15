@@ -118,6 +118,21 @@ def test_missing_key_and_cross_origin_mutation(tmp_path):
             "Host": "evil.example"}).status_code == 400
 
 
+def test_local_connection_saves_key_without_exposing_it(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    key = "test-openrouter-key"
+    with TestClient(create_app(settings(tmp_path, api_key=""))) as client:
+        assert client.get("/api/health").json()["configured"] is False
+        assert client.post("/api/connection", json={"api_key": key}, headers={
+            "Origin": "https://evil.example"}).status_code == 403
+        response = client.post("/api/connection", json={"api_key": key})
+        assert response.status_code == 200
+        assert response.json() == {"configured": True, "model": "openrouter/free"}
+        assert client.get("/api/health").json()["configured"] is True
+        assert key not in json.dumps(client.get("/api/health").json())
+        assert key in (tmp_path / ".env").read_text()
+
+
 @pytest.mark.parametrize("path", [
     "../outside", "/etc/passwd", "C:/Windows/test", "C:secret", "\\\\server\\share",
     "a/../secret", ".env", ".git/config", "a:stream", "NUL.txt", "a./file", "a\\..\\b",
