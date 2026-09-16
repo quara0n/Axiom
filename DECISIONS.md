@@ -458,3 +458,88 @@ and do not present the `f4dbba1f` evidence as proof that the permissive rule is 
 
 A task-constraint check exists (for example, a workspace rule derived from the task
 text), or scope drift is observed on tasks that do *not* forbid the extra files.
+
+---
+
+### ADR-012 — The dashboard does not grow with the length of agent text
+
+**Context**
+
+Every text field in the control room holds model output, and some of it is enormous:
+a Planner assignment is the whole task prompt, and a Reviewer summary is a full report.
+Rendered at full length those fields made a single `.workflow-step` 3 989 px tall and
+the page 16 782 px, so the task list the user needed was thousands of pixels away.
+
+**Decision**
+
+Clamp them. Long text fields inside the results panel are limited by CSS
+(`-webkit-line-clamp` plus a capped, scrollable container) and the untruncated string
+stays reachable through a `title` attribute. A panel's height is set by its layout,
+never by how much text an agent happened to produce. The same rule applies to the
+sidebar: a `nowrap` child must be allowed to shrink (`min-width:0`), or it will widen
+its container instead of ellipsising.
+
+**Why**
+
+Scrolling is a symptom, not a style preference. The user could not reach the task list
+while a run was loaded, which made every other part of the dashboard unusable. Truncating
+with a hover fallback keeps the full text available without letting content length
+decide the page height.
+
+**Consequences**
+
+- Summaries are shown as a preview; the full text is one hover (or one scroll inside
+  the panel) away.
+- Any future panel that renders raw agent text must adopt the same cap.
+- Measured in the browser afterwards: page height 16 782 → ~2 080 px, and the sidebar
+  no longer scrolls sideways.
+
+**Do not accidentally change**
+
+Do not "fix" a cramped-looking panel by removing the clamp, and do not give a text
+field a fixed pixel width in the sidebar — `max-width:190px` there was wider than the
+sidebar's own content box and produced a 13 826 px horizontal scroll.
+
+**Revisit when**
+
+The results panel gets a dedicated detail view, in which case the summary can be a
+single line that opens the full report.
+
+---
+
+### ADR-013 — Navigation reflects the view the user is in
+
+**Context**
+
+The two nav items ("Control room", "Activity") were plain anchors, and the `active`
+class was hardcoded on the first one. Clicking "Activity" scrolled to the section, but
+the sidebar still highlighted "Control room", and because the task data loads
+asynchronously the browser's own anchor jump landed at the wrong offset.
+
+**Decision**
+
+Nav clicks set view state and scroll the target section into view after the click,
+`window.location.hash` is kept in sync so the view is linkable and survives a reload,
+and the `active` class follows that state.
+
+**Why**
+
+"I cannot select the activity" was literally true: nothing in the sidebar changed when
+it was clicked. A navigation control that does not show what it selected is broken even
+if the scroll happens to work.
+
+**Consequences**
+
+- `#task` and `#activity` are both deep-linkable; the hash is read on mount.
+- The recent-tasks list is always clickable, including while a run is in flight — the
+  previous `disabled={running}` guard hid exactly the history you want during a run.
+
+**Do not accidentally change**
+
+Do not go back to a hardcoded `active` class, and do not re-add a `running` guard to
+task selection.
+
+**Revisit when**
+
+There are more than two views; at that point this becomes a router rather than a pair
+of anchors.
