@@ -69,6 +69,26 @@ def test_continuing_requires_a_finished_task_with_a_workspace(tmp_path):
         wait_task(client, running["id"])
 
 
+def test_continuing_inherits_the_earlier_model_plan(tmp_path):
+    provider = MockProvider()
+    with TestClient(create_app(settings(tmp_path), provider)) as client:
+        first = client.post("/api/tasks", json={
+            "task": "Build", "model": "plan/main", "models": {"Coder": "plan/coder"}}).json()
+        wait_task(client, first["id"])
+        # No model in the request: the continuation keeps the team from the source task.
+        second = client.post("/api/tasks", json={
+            "task": "More", "continue_from": first["id"]}).json()
+        assert second["model"] == "plan/main"
+        assert second["models"] == {"Coder": "plan/coder"}
+        assert second["agents"][1]["model"] == "plan/coder"
+        wait_task(client, second["id"])
+        # An explicit choice still wins.
+        third = client.post("/api/tasks", json={
+            "task": "Other", "model": "other/main", "continue_from": first["id"]}).json()
+        assert third["model"] == "other/main"
+        wait_task(client, third["id"])
+
+
 def test_continuing_refuses_a_source_that_breaks_the_workspace_limits(tmp_path):
     source = tmp_path / "source"
     source.mkdir()

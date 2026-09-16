@@ -133,6 +133,11 @@ def create_app(settings=None, provider=None):
                 raise HTTPException(404, "The task to continue was not found.")
             if source["status"] not in TERMINAL:
                 raise HTTPException(409, "Wait for that task to finish before continuing it.")
+            # A continuation keeps the earlier team configuration unless the caller
+            # overrides it; otherwise it silently falls back to the default model.
+            if not body.model and not requested:
+                model = source.get("model") or model
+                per_agent = dict(source.get("models") or {})
         value = request.app.state.store.create(task, model, per_agent)
         # Project instructions carry over unless the new request overrides them,
         # so a follow-up keeps the rules the original task was built under.
