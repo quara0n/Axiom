@@ -62,6 +62,22 @@ many subagents run at once and how many fit in one delegation call;
 under `<workspace root>/.workers/<task>` and are deleted when the task ends; the
 durable per-subagent reports stay in SQLite.
 
+### Continuing an earlier task
+
+Every task starts in its own workspace, so a follow-up inherits nothing by default.
+Pass `continue_from` (a task id) to the task API, or press "Continue from this task"
+in the dashboard, to seed the new task from the earlier one: project files are copied
+in (guidance files are not — the runtime writes its own `AGENTS.md`), the earlier
+reports and verification are handed to every agent, and project instructions carry
+over unless the new request overrides them. The copy obeys the same file count,
+per-file size and symlink limits as any other write. Agents are told that the code
+already exists and to rebuild only what is missing.
+
+This is not a resume of the old run. There is no graph checkpointing: the new task is
+a fresh pass over the inherited files, with its own budget, repair rounds and
+verification. It exists so interrupted or finished work can be continued instead of
+rebuilt from nothing.
+
 ### Shared project guidance
 
 New workspaces receive an `AGENTS.md` with common collaboration rules. Optional

@@ -254,6 +254,43 @@ def tool_schema(name, description, properties=None, required=None):
     }}
 
 
+def copy_workspace_files(source: Path, target: "Workspace"):
+    """Seed a new task from an earlier task's workspace.
+
+    Guidance files are skipped: the runtime writes its own AGENTS.md so project
+    instructions stay authoritative for the new task. The same file count, per-file
+    and total size limits apply as for any other write, so an earlier task cannot
+    push a workspace over the limits.
+    """
+    source = Path(source)
+    if not source.is_dir():
+        raise ValueError("There is no workspace to continue from.")
+    copied, total = [], 0
+    for base, directories, names in os.walk(source, followlinks=False):
+        for name in [*directories, *names]:
+            info = (Path(base) / name).lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise ValueError("Symbolic links and Windows reparse points are forbidden.")
+        for name in names:
+            origin = Path(base) / name
+            relative = origin.relative_to(source).as_posix()
+            if Path(relative).name.lower() == "agents.md":
+                continue
+            content = origin.read_bytes()
+            if len(content) > MAX_FILE_BYTES:
+                raise ValueError(f"{relative} exceeds the workspace copy limit.")
+            if copied and len(copied) >= MAX_FILES:
+                raise ValueError("Workspace file count limit reached.")
+            if total + len(content) > MAX_TOTAL_BYTES:
+                raise ValueError("Workspace size limit reached.")
+            destination = target.path(relative)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(content)
+            copied.append(relative)
+            total += len(content)
+    return sorted(copied)
+
+
 def tools_for(role):
     path = {"path": {"type": "string", "description": "Relative workspace file path"}}
     tools = [

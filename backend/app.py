@@ -13,6 +13,7 @@ from .config import Settings
 from .provider import OpenRouter, ProviderError
 from .runtime import Runtime
 from .store import ROLES, Store, TERMINAL
+from .workspace import Workspace, copy_workspace_files
 
 MODEL_PATTERN = r"[A-Za-z0-9~][A-Za-z0-9_./:~-]{0,199}"
 
@@ -21,6 +22,7 @@ class TaskRequest(BaseModel):
     model: str | None = Field(default=None, max_length=200)
     models: dict[str, str] | None = None
     project_instructions: str = Field(default="", max_length=16000)
+    continue_from: str | None = Field(default=None, max_length=64)
 
 
 class ConnectionRequest(BaseModel):
@@ -124,10 +126,35 @@ def create_app(settings=None, provider=None):
         runtime = request.app.state.runtime
         if len(runtime.jobs) >= 10:
             raise HTTPException(429, "Too many pending tasks. Wait or cancel a task.")
+        source = None
+        if body.continue_from:
+            source = request.app.state.store.get(body.continue_from)
+            if not source:
+                raise HTTPException(404, "The task to continue was not found.")
+            if source["status"] not in TERMINAL:
+                raise HTTPException(409, "Wait for that task to finish before continuing it.")
         value = request.app.state.store.create(task, model, per_agent)
-        value["project_instructions"] = body.project_instructions.strip()
+        # Project instructions carry over unless the new request overrides them,
+        # so a follow-up keeps the rules the original task was built under.
+        instructions = body.project_instructions.strip() or (source or {}).get("project_instructions", "")
+        value["project_instructions"] = instructions
         value["workspace"] = str((settings.workspace_root / value["id"]).absolute())
         value["files"] = []
+        if source:
+            workspace = Workspace(settings.workspace_root / value["id"])
+            try:
+                seeded = copy_workspace_files(settings.workspace_root / source["id"], workspace)
+            except (ValueError, OSError) as exc:
+                raise HTTPException(422, workspace.error_message(exc)) from exc
+            value["continue_from"] = source["id"]
+            value["files"] = seeded
+            value["continuation"] = {
+                "task": source["task"], "status": source["status"], "summary": source["summary"],
+                "reports": {agent["name"]: agent["result"] for agent in source["agents"] if agent["result"]},
+                "verification": source.get("verification"),
+                "note": (f"Continuing task {source['id']}. Its files are already in this workspace; "
+                         "inspect them before changing anything and only redo work that is missing."),
+            }
         request.app.state.store.save(value)
         runtime.start(value)
         return value
