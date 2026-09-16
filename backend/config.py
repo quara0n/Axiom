@@ -12,7 +12,7 @@ class Settings:
     workspace_root: Path = Path(".axiom/workspaces")
     database: Path = Path(".axiom/tasks.sqlite3")
     credentials: Path = Path(".axiom/credentials.env")
-    task_timeout: float = 600
+    task_timeout: float = 1800
     max_tool_rounds: int = 40
     max_repair_rounds: int = 2
     max_model_calls: int = 240
@@ -45,7 +45,7 @@ class Settings:
             workspace_root=Path(os.getenv("AXIOM_WORKSPACE_ROOT", ".axiom/workspaces")).absolute(),
             database=Path(os.getenv("AXIOM_DATABASE", ".axiom/tasks.sqlite3")).absolute(),
             credentials=credentials,
-            task_timeout=max(10, min(float(os.getenv("AXIOM_TASK_TIMEOUT", "600")), 3600)),
+            task_timeout=max(30, min(float(os.getenv("AXIOM_TASK_TIMEOUT", "1800")), 7200)),
             max_tool_rounds=max(1, min(int(os.getenv("AXIOM_MAX_TOOL_ROUNDS", "40")), 120)),
             max_repair_rounds=max(0, min(int(os.getenv("AXIOM_MAX_REPAIR_ROUNDS", "2")), 5)),
             max_model_calls=max(1, min(int(os.getenv("AXIOM_MAX_MODEL_CALLS", "240")), 1000)),

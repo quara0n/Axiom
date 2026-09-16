@@ -37,6 +37,8 @@ fresh validation, testing and review. The plan is retained instead of regenerate
 `AXIOM_MAX_REPAIR_ROUNDS` defaults to 2 additional passes (0 disables repair).
 Unchanged files after an unsuccessful repair stop the loop early.
 `AXIOM_MAX_MODEL_CALLS` caps calls across the entire task, including repairs.
+`AXIOM_TASK_TIMEOUT` defaults to 1800 seconds for the whole task, subagents and
+repair rounds included; a timed-out task keeps the files it already wrote.
 The API records `round_history`, `repair_round`, `model_calls`, and `verification`.
 Each invocation has separate task state and prior reports. Agents retain their
 individual model selection and bounded workspace tool loops.

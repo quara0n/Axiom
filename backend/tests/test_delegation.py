@@ -256,3 +256,22 @@ def test_delegation_tools_are_offered_to_the_lead_coder_only():
         assert not DELEGATION_NAMES & {tool["function"]["name"] for tool in tools_for(role)}
     # The runtime adds the delegation tools to the Lead Coder, not the base tool list.
     assert "delegate_tasks" not in {tool["function"]["name"] for tool in tools_for("Coder")}
+
+
+def test_subagent_activity_is_labelled_and_does_not_touch_the_task_file_list(tmp_path):
+    async def run():
+        _, runtime, value, workspace = harness(tmp_path, WorkerProvider())
+        value["files"] = ["AGENTS.md"]
+        delegation = Delegation(runtime, value, workspace)
+        result = await delegation.call("delegate_tasks", {"tasks": [CORE]}, {})
+        # Worker tool calls must be attributable to the subagent, not the Lead Coder.
+        labels = {event["agent"] for event in value["events"] if event["text"].startswith("Tool ")}
+        assert labels == {"Coder/Core"}
+        # The worker wrote in its own copy; the task still lists only integrated files.
+        assert value["files"] == ["AGENTS.md"]
+        worker = result["workers"][0]
+        await delegation.call("inspect_worker", {"worker_id": worker["id"], "path": "core.py"}, {})
+        await delegation.call("integrate_worker", {"worker_id": worker["id"]}, {})
+        assert value["files"] == ["core.py"]
+
+    asyncio.run(run())

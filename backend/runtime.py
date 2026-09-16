@@ -100,8 +100,12 @@ class Runtime:
     def terminate(self, value, status, error=None):
         value["status"], value["error"] = status, error
         for agent in value["agents"]:
-            if agent["status"] in {"running", "pending"}:
+            # Only the agent that was actually working failed. An agent that never
+            # started stays pending, so a timeout cannot look like four broken agents.
+            if agent["status"] == "running":
                 agent["status"] = status if status == "cancelled" else "failed"
+            elif agent["status"] == "pending" and status == "cancelled":
+                agent["status"] = "cancelled"
         self.event(value, "System", error or "Task cancelled.")
 
     @staticmethod
@@ -133,7 +137,9 @@ class Runtime:
         except asyncio.CancelledError:
             self.terminate(value, "cancelled")
         except TimeoutError:
-            self.terminate(value, "failed", "Task exceeded its time limit.")
+            self.terminate(value, "failed", "Task exceeded its time limit. Files already "
+                           "written are kept in this task's workspace; raise "
+                           "AXIOM_TASK_TIMEOUT to give the team more time.")
         except ProviderError as exc:
             self.terminate(value, "failed", str(exc))
         except Exception:
@@ -254,6 +260,9 @@ class Runtime:
 
     async def run_agent(self, value, role, workspace, previous, worker=None):
         model = self.model_for(value, role)
+        # Subagent activity must be attributable: the activity log names the worker,
+        # not just the Lead Coder that delegated the package.
+        label = f"Coder/{worker['name']}" if worker else role
         # Only the Lead Coder can delegate, and a subagent cannot delegate again.
         delegation = Delegation(self, value, workspace) if role == "Coder" and worker is None else None
         tools = tools_for(role) + (delegation_tools() if delegation else [])
@@ -369,9 +378,11 @@ class Runtime:
                     else:
                         result = workspace.call(name, args, role)
                     successful_tools.add(name)
-                    if name in {"write_file", "edit_file"}:
+                    # A subagent writes in its own copy; the task's file list must keep
+                    # describing the integrated workspace.
+                    if name in {"write_file", "edit_file"} and worker is None:
                         value["files"] = workspace.files()
-                    self.event(value, role, f"Tool {name}: {args.get('path', 'workspace')}")
+                    self.event(value, label, f"Tool {name}: {args.get('path', 'workspace')}")
                 except (ValueError, KeyError, TypeError, OSError, SyntaxError) as exc:
                     # Avoid leaking absolute paths from OS errors.
                     value["tool_failures"] = value.get("tool_failures", 0) + 1
@@ -379,7 +390,7 @@ class Runtime:
                     # Name what was refused: a bare "rejected" line tells the reader nothing.
                     path = args.get("path") if isinstance(args, dict) else None
                     detail = " ".join(part for part in (name, path) if isinstance(part, str) and part)
-                    self.event(value, role, f"Tool call rejected: {detail or 'invalid call'} ({type(exc).__name__}).")
+                    self.event(value, label, f"Tool call rejected: {detail or 'invalid call'} ({type(exc).__name__}).")
                 messages.append({"role": "tool", "tool_call_id": call_id,
                                  "content": json.dumps(result, ensure_ascii=False)})
         raise ProviderError(f"{role} exceeded its tool round limit.")

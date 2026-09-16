@@ -422,6 +422,18 @@ def test_task_timeout(tmp_path):
         value = wait_task(client, task_id)
         assert value["status"] == "failed"
         assert "time limit" in value["error"]
+        # Only the agent that was working counts as failed; the rest never started.
+        assert value["agents"][0]["status"] == "failed"
+        assert [agent["status"] for agent in value["agents"][1:]] == ["pending"] * 3
+        assert "workspace" in value["error"]
+
+
+def test_task_timeout_defaults_are_generous_and_bounded(monkeypatch):
+    assert Settings().task_timeout == 1800
+    monkeypatch.setenv("AXIOM_TASK_TIMEOUT", "99999")
+    assert Settings.from_env().task_timeout == 7200
+    monkeypatch.setenv("AXIOM_TASK_TIMEOUT", "1")
+    assert Settings.from_env().task_timeout == 30
 
 
 def test_graph_keeps_concurrent_task_context_isolated(tmp_path):
