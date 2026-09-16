@@ -50,9 +50,12 @@ The remaining proof is a run that finishes and gets a verdict.
 
 ### IN PROGRESS / PARTIAL
 
-- **No live run has exercised the new runtime yet.** The most recent run
-  (`f4dbba1f`) died on the *old* round ceiling: 13 files, 49 tool calls, Tester and
-  Reviewer never started.
+- **Superseded 2026-09-16 — the runtime has now run end to end.** `744af3f3` (Varg i
+  hagen) finished `completed` with `review_verdict: approved`, 38 model calls and 0
+  repair rounds. `4e5f4e80` (Zombiegata) reached Reviewer, was rejected, exercised the
+  repair edge (`repair_round: 1`) and then failed on a Coder repeat-loop rather than on a
+  limit. What is still unexercised is delegation: `workers` is empty for every task, so
+  no run has used a Coder subagent yet. See `HANDOFF-FOR-ASTRA.md` for the full table.
 - Scope drift is not enforced anywhere. The Coder role prompt deliberately allows
   dependency manifests and build configuration when the product needs them (ADR-011),
   but a task that *forbids* them is not checked, and one run added `package.json` and
@@ -62,8 +65,10 @@ The remaining proof is a run that finishes and gets a verdict.
 
 ### NEXT
 
-1. Run one multi-file task to completion. Confirm `route_after_review` fires at least
-   once and that a subagent is used.
+1. ~~Run one multi-file task to completion. Confirm `route_after_review` fires at least
+   once and that a subagent is used.~~ **Done for the first two, open for the third:**
+   `744af3f3` completed with an approved verdict and `4e5f4e80` fired the repair edge, but
+   no run has yet delegated to a Coder subagent.
 2. Execute the produced artifacts outside the agent (`node tests/...`) and record the
    result in the task summary.
 3. Only then revisit the round, time and token defaults.
