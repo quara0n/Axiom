@@ -21,6 +21,10 @@ class Settings:
     max_tokens: int = 32768
     reasoning_max_tokens: int = 2048
     request_timeout: float = 180
+    # Running generated code is a real boundary decision, so it is off until the
+    # operator turns it on. Discovery of declared checks is always on.
+    allow_execution: bool = False
+    execution_timeout: float = 120
     allowed_origins: tuple[str, ...] = (
         "http://localhost:3000", "http://127.0.0.1:3000",
         "http://localhost:5173", "http://127.0.0.1:5173",
@@ -54,4 +58,7 @@ class Settings:
             max_tokens=max(1024, min(int(os.getenv("AXIOM_MAX_TOKENS", "32768")), 200000)),
             reasoning_max_tokens=max(0, min(int(os.getenv("AXIOM_REASONING_MAX_TOKENS", "2048")), 100000)),
             request_timeout=max(30, min(float(os.getenv("AXIOM_REQUEST_TIMEOUT", "180")), 1800)),
+            allow_execution=os.getenv("AXIOM_ALLOW_EXECUTION", "").strip().lower()
+            in {"1", "true", "yes", "on"},
+            execution_timeout=max(5, min(float(os.getenv("AXIOM_EXECUTION_TIMEOUT", "120")), 1800)),
         )
