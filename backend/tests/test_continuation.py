@@ -107,3 +107,15 @@ def test_continuing_skips_guidance_files(tmp_path):
     assert copy_workspace_files(source, target) == ["nested/game.js"]
     assert target.files() == ["nested/game.js"]
     assert Path(target.root, "nested", "game.js").read_text() == "export const game = 1;\n"
+
+
+def test_rejected_continuation_does_not_leave_a_queued_task(tmp_path):
+    config = settings(tmp_path)
+    with TestClient(create_app(config, MockProvider())) as client:
+        source = client.app.state.store.create("Missing workspace", "test/model")
+        source["status"] = "failed"
+        client.app.state.store.save(source)
+        response = client.post("/api/tasks", json={
+            "task": "Continue", "continue_from": source["id"]})
+        assert response.status_code == 422
+        assert [task["id"] for task in client.get("/api/tasks").json()["tasks"]] == [source["id"]]

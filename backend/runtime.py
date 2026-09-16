@@ -399,8 +399,13 @@ class Runtime:
                     if not isinstance(args, dict):
                         raise ValueError("Tool arguments must be an object.")
                     signature = f"{name} {args.get('path') or args.get('query') or ''}".strip()
-                    repeats[signature] = repeats.get(signature, 0) + 1
-                    if repeats[signature] > MAX_REPEATED_CALLS:
+                    # Different edits and worker IDs are distinct operations even
+                    # when they target the same file or use the same tool.
+                    argument_digest = hashlib.sha256(
+                        json.dumps(args, sort_keys=True).encode()).hexdigest()
+                    repeat_key = (name, argument_digest)
+                    repeats[repeat_key] = repeats.get(repeat_key, 0) + 1
+                    if repeats[repeat_key] > MAX_REPEATED_CALLS:
                         raise ProviderError(
                             f"{role} repeated {signature} without reaching a conclusion. "
                             "Report what you have found so far, or say what is blocking you.")

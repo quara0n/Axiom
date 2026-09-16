@@ -138,7 +138,9 @@ def create_app(settings=None, provider=None):
             if not body.model and not requested:
                 model = source.get("model") or model
                 per_agent = dict(source.get("models") or {})
-        value = request.app.state.store.create(task, model, per_agent)
+        # Publish only after continuation preparation succeeds; rejected requests
+        # must not leave queued tasks with no corresponding runtime job.
+        value = request.app.state.store.create(task, model, per_agent, persist=False)
         # Project instructions carry over unless the new request overrides them,
         # so a follow-up keeps the rules the original task was built under.
         instructions = body.project_instructions.strip() or (source or {}).get("project_instructions", "")

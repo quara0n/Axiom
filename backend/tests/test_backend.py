@@ -17,6 +17,16 @@ from backend.store import Store
 from backend.workspace import Workspace
 
 
+def test_saving_an_older_task_preserves_recent_task_order(tmp_path):
+    store = Store(tmp_path / "order.sqlite3")
+    older = store.create("Older", "test/model")
+    newer = store.create("Newer", "test/model")
+    older["summary"] = "Progress update"
+    store.save(older)
+    assert [task["id"] for task in store.list()] == [newer["id"], older["id"]]
+    assert store.get(older["id"])["summary"] == "Progress update"
+
+
 class MockProvider:
     def __init__(self, fail=False, delay=0):
         self.calls = []
@@ -285,6 +295,29 @@ def test_work_round_limit_stops_an_agent_that_keeps_changing_the_project(tmp_pat
         assert value["status"] == "failed"
         assert "work round limit" in value["error"]
         assert "AXIOM_MAX_TOOL_ROUNDS" in value["error"]
+
+
+def test_distinct_edits_to_the_same_file_are_not_a_repeat_loop(tmp_path):
+    class IncrementalProvider(MockProvider):
+        async def complete(self, model, messages, tools):
+            if "You are Coder." in messages[0]["content"]:
+                count = sum(message["role"] == "tool" for message in messages)
+                if count < 7:
+                    name = "write_file" if count == 0 else "edit_file"
+                    args = {"path": "main.py", "content": "value = 0\n"} if count == 0 else {
+                        "path": "main.py", "old_text": f"value = {count - 1}",
+                        "new_text": f"value = {count}"}
+                    return {"content": None, "tool_calls": [{
+                        "id": f"step-{count}", "type": "function",
+                        "function": {"name": name, "arguments": json.dumps(args)}}]}
+            return await super().complete(model, messages, tools)
+
+    config = settings(tmp_path, max_tool_rounds=20)
+    with TestClient(create_app(config, IncrementalProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Build incrementally"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "completed", value
+        assert (config.workspace_root / task_id / "main.py").read_text() == "value = 6\n"
 
 
 def test_reviewer_can_reject_implementation(tmp_path):

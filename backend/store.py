@@ -24,7 +24,7 @@ class Store:
     def connect(self):
         return sqlite3.connect(self.path, timeout=10)
 
-    def create(self, task: str, model: str, models=None):
+    def create(self, task: str, model: str, models=None, *, persist=True):
         chosen = {role: models[role] for role in ROLES if models and models.get(role)}
         value = {
             "id": uuid4().hex, "task": task, "model": model, "models": chosen, "status": "queued",
@@ -33,13 +33,15 @@ class Store:
                         "model": chosen.get(role, model)}
                        for role in ROLES], "events": [],
         }
-        self.save(value)
+        if persist:
+            self.save(value)
         return value
 
     def save(self, value):
         value["updated_at"] = now()
         with self.connect() as db:
-            db.execute("INSERT OR REPLACE INTO tasks VALUES (?, ?)",
+            db.execute("INSERT INTO tasks (id, data) VALUES (?, ?) "
+                       "ON CONFLICT(id) DO UPDATE SET data = excluded.data",
                        (value["id"], json.dumps(value, ensure_ascii=False)))
 
     def get(self, task_id):
