@@ -25,6 +25,13 @@ class Settings:
     # operator turns it on. Discovery of declared checks is always on.
     allow_execution: bool = False
     execution_timeout: float = 120
+    # A transient provider failure should not end a task, and recovery that spends
+    # money on its own stays off until the operator asks for it.
+    max_provider_attempts: int = 3
+    provider_retry_base: float = 1.0
+    auto_resume: bool = False
+    auto_continue: bool = False
+    max_auto_recovery: int = 1
     allowed_origins: tuple[str, ...] = (
         "http://localhost:3000", "http://127.0.0.1:3000",
         "http://localhost:5173", "http://127.0.0.1:5173",
@@ -61,4 +68,10 @@ class Settings:
             allow_execution=os.getenv("AXIOM_ALLOW_EXECUTION", "").strip().lower()
             in {"1", "true", "yes", "on"},
             execution_timeout=max(5, min(float(os.getenv("AXIOM_EXECUTION_TIMEOUT", "120")), 1800)),
+            max_provider_attempts=max(1, min(int(os.getenv("AXIOM_MAX_PROVIDER_ATTEMPTS", "3")), 8)),
+            provider_retry_base=max(0.0, min(float(os.getenv("AXIOM_PROVIDER_RETRY_BASE", "1")), 30)),
+            auto_resume=os.getenv("AXIOM_AUTO_RESUME", "").strip().lower() in {"1", "true", "yes", "on"},
+            auto_continue=os.getenv("AXIOM_AUTO_CONTINUE", "").strip().lower()
+            in {"1", "true", "yes", "on"},
+            max_auto_recovery=max(0, min(int(os.getenv("AXIOM_MAX_AUTO_RECOVERY", "1")), 5)),
         )

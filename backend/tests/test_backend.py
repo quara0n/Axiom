@@ -215,11 +215,14 @@ def test_symlink_or_junction_rejected(tmp_path):
         workspace.files()
 
 
-def test_restart_marks_unfinished_tasks_failed(tmp_path):
+def test_restart_marks_unfinished_tasks_resumable(tmp_path):
+    # A restart keeps the workspace, so the run is interrupted rather than lost.
     store = Store(tmp_path / "db.sqlite3")
     value = store.create("unfinished", "test/model")
-    store.recover()
-    assert store.get(value["id"])["status"] == "failed"
+    assert store.recover() == [value["id"]]
+    interrupted = store.get(value["id"])
+    assert interrupted["status"] == "interrupted"
+    assert "Resume it" in interrupted["error"]
 
 
 def test_provider_error_does_not_expose_secrets():

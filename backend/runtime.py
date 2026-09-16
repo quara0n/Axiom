@@ -9,6 +9,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .provider import ProviderError
 from .coordination import DEFAULT_PROJECT_INSTRUCTIONS, compact_messages, handoff_text
+from .continuation import prepare_continuation
 from .delegation import DELEGATION_NAMES, Delegation, delegation_tools
 from . import runner
 from .store import ROLES, TERMINAL, now
@@ -154,6 +155,41 @@ class Runtime:
             elif agent["status"] == "pending" and status == "cancelled":
                 agent["status"] = "cancelled"
         self.event(value, "System", error or "Task cancelled.")
+        if status == "failed":
+            self.maybe_continue(value)
+
+    # A run that stopped because the team could not make progress is worth one more
+    # attempt; a run that stopped because the account is empty or the budget is spent
+    # is not, and retrying it would only spend more.
+    AUTO_CONTINUE_CLASSES = (
+        "without reaching a conclusion",
+        "Repair stopped because project files did not change",
+        "repair budget exhausted",
+    )
+
+    def maybe_continue(self, value):
+        """Start one bounded continuation after a defined failure class."""
+        if not self.settings.auto_continue:
+            return None
+        error = value.get("error") or ""
+        if not any(marker in error for marker in self.AUTO_CONTINUE_CLASSES):
+            return None
+        depth = int(value.get("continuation_depth", 0))
+        if depth >= self.settings.max_auto_recovery:
+            self.event(value, "System", "Automatic recovery is capped for this task; stop here.")
+            return None
+        try:
+            continued = prepare_continuation(
+                self.settings, self.store, value["task"], value.get("model") or self.settings.model,
+                dict(value.get("models") or {}), value.get("project_instructions", ""), value,
+                auto=f"continued after this failure: {error}")
+        except (ValueError, OSError) as exc:
+            self.event(value, "System", f"Automatic recovery could not start: {exc}")
+            return None
+        self.event(value, "System",
+                   f"Automatic recovery started task {continued['id']} from this workspace.")
+        self.start(continued)
+        return continued
 
     @staticmethod
     def model_for(value, role):

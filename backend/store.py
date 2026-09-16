@@ -55,14 +55,23 @@ class Store:
         return [json.loads(row[0]) for row in rows]
 
     def recover(self):
+        """A restart no longer throws a run away: the workspace is still there.
+
+        Returns the ids that were interrupted, so a caller that wants to can start
+        continuations for them instead of waiting for the operator.
+        """
+        interrupted = []
         with self.connect() as db:
             rows = db.execute("SELECT data FROM tasks").fetchall()
         for row in rows:
             value = json.loads(row[0])
             if value["status"] not in TERMINAL:
-                value["status"] = "failed"
-                value["error"] = "Backend restarted before this task finished. Start a new task to retry."
+                value["status"] = "interrupted"
+                value["error"] = ("The backend restarted while this task was running. Resume it "
+                                  "to continue from the files it already wrote.")
                 for agent in value["agents"]:
                     if agent["status"] in {"running", "pending"}:
-                        agent["status"] = "failed"
+                        agent["status"] = "interrupted"
                 self.save(value)
+                interrupted.append(value["id"])
+        return interrupted

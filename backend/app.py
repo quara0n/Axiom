@@ -10,13 +10,16 @@ from pydantic import BaseModel, Field
 from dotenv import set_key
 
 from .config import Settings
-from .coordination import handoff_text
+from .continuation import prepare_continuation
 from .provider import OpenRouter, ProviderError
 from .runtime import Runtime
 from .store import ROLES, Store, TERMINAL
-from .workspace import Workspace, copy_workspace_files
 
 MODEL_PATTERN = r"[A-Za-z0-9~][A-Za-z0-9_./:~-]{0,199}"
+
+# A task that was interrupted by a restart is still a valid thing to continue from;
+# the workspace it wrote is on disk.
+CONTINUABLE = TERMINAL | {"interrupted"}
 
 class TaskRequest(BaseModel):
     task: str = Field(min_length=1, max_length=20000)
@@ -36,14 +39,31 @@ def create_app(settings=None, provider=None):
     @asynccontextmanager
     async def lifespan(app):
         app.state.store = Store(settings.database)
-        app.state.store.recover()
+        interrupted = app.state.store.recover()
         app.state.provider = provider or OpenRouter(
             settings.api_key, max_tokens=settings.max_tokens,
             reasoning_max_tokens=settings.reasoning_max_tokens,
             request_timeout=settings.request_timeout,
+            max_attempts=settings.max_provider_attempts,
+            retry_base=settings.provider_retry_base,
         )
         app.state.api_key = settings.api_key
         app.state.runtime = Runtime(settings, app.state.store, app.state.provider)
+        # Recovery spends the operator's money, so it happens only when asked for.
+        if settings.auto_resume:
+            for task_id in interrupted[: settings.max_auto_recovery]:
+                source = app.state.store.get(task_id)
+                if not source:
+                    continue
+                try:
+                    value = prepare_continuation(
+                        settings, app.state.store, source["task"],
+                        source.get("model") or settings.model, dict(source.get("models") or {}),
+                        source.get("project_instructions", ""), source,
+                        auto="resumed automatically after a backend restart")
+                except ValueError:
+                    continue
+                app.state.runtime.start(value)
         yield
         await app.state.runtime.close()
         await app.state.provider.close()
@@ -132,43 +152,40 @@ def create_app(settings=None, provider=None):
             source = request.app.state.store.get(body.continue_from)
             if not source:
                 raise HTTPException(404, "The task to continue was not found.")
-            if source["status"] not in TERMINAL:
+            if source["status"] not in CONTINUABLE:
                 raise HTTPException(409, "Wait for that task to finish before continuing it.")
             # A continuation keeps the earlier team configuration unless the caller
             # overrides it; otherwise it silently falls back to the default model.
             if not body.model and not requested:
                 model = source.get("model") or model
                 per_agent = dict(source.get("models") or {})
-        # Publish only after continuation preparation succeeds; rejected requests
-        # must not leave queued tasks with no corresponding runtime job.
-        value = request.app.state.store.create(task, model, per_agent, persist=False)
-        # Project instructions carry over unless the new request overrides them,
-        # so a follow-up keeps the rules the original task was built under.
         instructions = body.project_instructions.strip() or (source or {}).get("project_instructions", "")
-        value["project_instructions"] = instructions
-        value["workspace"] = str((settings.workspace_root / value["id"]).absolute())
-        value["files"] = []
         if source:
-            workspace = Workspace(settings.workspace_root / value["id"])
             try:
-                seeded = copy_workspace_files(settings.workspace_root / source["id"], workspace)
-            except (ValueError, OSError) as exc:
-                raise HTTPException(422, workspace.error_message(exc)) from exc
-            value["continue_from"] = source["id"]
-            value["files"] = seeded
-            value["continuation"] = {
-                "task": source["task"], "status": source["status"], "summary": source["summary"],
-                # Reports carried into a new task are bounded for the same reason they are
-                # bounded between roles: the full text stays in the earlier task's record.
-                "reports": {agent["name"]: handoff_text(agent["result"])
-                            for agent in source["agents"] if agent["result"]},
-                "verification": source.get("verification"),
-                "note": (f"Continuing task {source['id']}. Its files are already in this workspace; "
-                         "inspect them before changing anything and only redo work that is missing."),
-            }
-        request.app.state.store.save(value)
+                value = prepare_continuation(settings, request.app.state.store, task, model,
+                                             per_agent, instructions, source)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+        else:
+            # Publish only after preparation succeeds; rejected requests must not leave
+            # queued tasks with no corresponding runtime job.
+            value = request.app.state.store.create(task, model, per_agent, persist=False)
+            value["project_instructions"] = instructions
+            value["workspace"] = str((settings.workspace_root / value["id"]).absolute())
+            value["files"] = []
+            request.app.state.store.save(value)
         runtime.start(value)
         return value
+
+    @app.post("/api/tasks/{task_id}/resume", status_code=202)
+    async def resume(task_id: str, request: Request):
+        """Continue an interrupted (or finished) task without retyping anything."""
+        source = request.app.state.store.get(task_id)
+        if not source:
+            raise HTTPException(404, "Task not found.")
+        if source["status"] not in CONTINUABLE:
+            raise HTTPException(409, "Wait for that task to finish before resuming it.")
+        return await create_task(TaskRequest(task=source["task"], continue_from=task_id), request)
 
     @app.get("/api/tasks")
     async def tasks(request: Request):
