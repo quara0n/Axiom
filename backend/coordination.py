@@ -37,11 +37,15 @@ launch and manual test steps for anything this runtime cannot execute.
 """
 
 
-def compact_messages(messages, limit=100_000):
+def compact_messages(messages, limit=200_000):
     """Drop old tool payloads first, preserving call IDs and recent observations.
 
     The first two messages contain the durable task/handoff context. An agent can
     re-read any omitted file; trimming never invents a successful tool result.
+
+    The limit has to fit one inspection pass over a real project. When it is too
+    tight, an agent that reads a large file gets its own earlier output omitted and
+    reads the same file again, which turns into an expensive read loop.
     """
     size = len(json.dumps(messages))
     for message in messages[2:-6]:

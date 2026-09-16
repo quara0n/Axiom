@@ -232,10 +232,17 @@ def test_provider_error_does_not_expose_secrets():
 
 def test_inspection_rounds_are_bounded_by_the_model_call_budget(tmp_path):
     class LoopProvider(MockProvider):
+        def __init__(self):
+            super().__init__()
+            self.round = 0
+
         async def complete(self, model, messages, tools):
+            # Different query every round: this is a diligent agent, not a loop.
+            self.round += 1
             return {"content": None, "tool_calls": [{
                 "id": "loop", "type": "function",
-                "function": {"name": "list_files", "arguments": "{}"},
+                "function": {"name": "search_files",
+                             "arguments": json.dumps({"query": f"needle-{self.round}"})},
             }]}
     # Reading files is not a runaway loop: the task-wide call budget stops it, and the
     # per-agent round limit is reserved for rounds that change the project.
@@ -245,6 +252,23 @@ def test_inspection_rounds_are_bounded_by_the_model_call_budget(tmp_path):
         value = wait_task(client, task_id)
         assert value["status"] == "failed"
         assert "model-call budget" in value["error"]
+
+
+def test_repeated_identical_calls_stop_the_agent_early(tmp_path):
+    class RepeatProvider(MockProvider):
+        async def complete(self, model, messages, tools):
+            return {"content": None, "tool_calls": [{
+                "id": "again", "type": "function",
+                "function": {"name": "read_file", "arguments": json.dumps({"path": "AGENTS.md"})},
+            }]}
+
+    with TestClient(create_app(settings(tmp_path, max_model_calls=80), RepeatProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "failed"
+        assert "without reaching a conclusion" in value["error"]
+        # It must stop on the repeated call, not by draining the task budget.
+        assert value["model_calls"] < 15, value["model_calls"]
 
 
 def test_work_round_limit_stops_an_agent_that_keeps_changing_the_project(tmp_path):

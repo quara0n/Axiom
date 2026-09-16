@@ -32,6 +32,9 @@ and evidence; a report that restates file contents can be cut off by the output 
 # inherited code is diligence, not a runaway loop; the task-wide model-call budget is
 # what bounds inspection.
 WORK_TOOLS = {"write_file", "edit_file", "delegate_tasks", "inspect_worker", "integrate_worker"}
+
+# Reading many different files is diligence; reading the same one five times is a loop.
+MAX_REPEATED_CALLS = 4
 INSTRUCTIONS = {
     "Planner": COMMON + """
 You are Planner. You also own architecture: choose the smallest suitable stack,
@@ -306,6 +309,7 @@ class Runtime:
         successful_tools = set()
         nudges = {"empty": 0, "evidence": 0, "truncated": 0}
         work_rounds = 0
+        repeats = {}
         while work_rounds <= self.settings.max_tool_rounds:
             if value.get("model_calls", 0) >= self.settings.max_model_calls:
                 raise ProviderError("Task exceeded its total model-call budget.")
@@ -394,6 +398,12 @@ class Runtime:
                     args = json.loads(arguments)
                     if not isinstance(args, dict):
                         raise ValueError("Tool arguments must be an object.")
+                    signature = f"{name} {args.get('path') or args.get('query') or ''}".strip()
+                    repeats[signature] = repeats.get(signature, 0) + 1
+                    if repeats[signature] > MAX_REPEATED_CALLS:
+                        raise ProviderError(
+                            f"{role} repeated {signature} without reaching a conclusion. "
+                            "Report what you have found so far, or say what is blocking you.")
                     if delegation is not None and name in DELEGATION_NAMES:
                         result = await delegation.call(name, args, previous)
                     elif name == "validate_file":
