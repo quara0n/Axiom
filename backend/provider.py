@@ -1,3 +1,5 @@
+import time
+
 import httpx
 
 
@@ -35,14 +37,17 @@ class OpenRouter:
 
     async def _post(self, payload):
         response = await self.client.post("/chat/completions", json=payload)
+        attempts = 1
         if response.status_code == 400 and "reasoning" in payload:
             # Some providers reject the reasoning field outright; retry without it.
             self.reasoning_supported = False
             response = await self.client.post("/chat/completions", json={
                 key: value for key, value in payload.items() if key != "reasoning"})
-        return response
+            attempts = 2
+        return response, attempts
 
     async def complete(self, model, messages, tools):
+        started = time.perf_counter()
         try:
             payload = {
                 "model": model, "messages": messages, "tools": tools,
@@ -50,7 +55,7 @@ class OpenRouter:
             }
             if self.reasoning_supported:
                 payload["reasoning"] = {"max_tokens": self.reasoning_max_tokens}
-            response = await self._post(payload)
+            response, attempts = await self._post(payload)
             if response.status_code >= 400:
                 # Never return provider bodies, request headers or credentials to browsers.
                 raise ProviderError(f"OpenRouter returned HTTP {response.status_code}. Check model, account balance and backend API key.")
@@ -60,6 +65,14 @@ class OpenRouter:
             # not an unhelpful model, and the caller has to be able to tell them apart.
             message = choice["message"]
             message["finish_reason"] = choice.get("finish_reason")
+            # Keep what the provider already reported about the call. The ledger is
+            # the only place these numbers exist, and nothing estimates a missing one.
+            usage = body.get("usage")
+            message["usage"] = usage if isinstance(usage, dict) else None
+            message["resolved_model"] = body.get("model") if isinstance(body.get("model"), str) else None
+            message["generation_id"] = body.get("id") if isinstance(body.get("id"), str) else None
+            message["attempts"] = attempts
+            message["latency_ms"] = round((time.perf_counter() - started) * 1000)
             return message
         except (httpx.HTTPError, ValueError, KeyError, IndexError) as exc:
             raise ProviderError("OpenRouter request failed or returned an invalid response.") from exc

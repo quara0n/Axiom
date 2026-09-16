@@ -3,7 +3,20 @@ import { useEffect, useRef, useState } from "react";
 import { Activity, Bot, Braces, Check, ChevronDown, FlaskConical, Network, Play, Settings, ShieldCheck, Sparkles, X } from "lucide-react";
 type AgentState = "idle" | "working" | "done" | "failed" | "cancelled";
 type WorkStep = { agent:string; assignment:string; result:string; model?:string };
-type Task = { id:string; status:string; repair_round?:number; model_calls?:number; verification?:{mode:string;runtime_tested:boolean;visually_tested:boolean}; workers?:Array<{id:string;name:string;status:string;changed_files:string[]}>; workspace?:string; files?:string[]; summary:string; error?:string; agents:Array<{name:string;status:string;assignment:string;result:string;model?:string}>; events:Array<{agent:string;text:string;at:string}> };
+type Usage = { totals?:{calls?:number;unknown_calls?:number;prompt_tokens?:number;completion_tokens?:number;reasoning_tokens?:number;cached_tokens?:number;cost?:number;latency_ms?:number} };
+type Task = { id:string; status:string; repair_round?:number; model_calls?:number; usage?:Usage; verification?:{mode:string;runtime_tested:boolean;visually_tested:boolean;execution?:{state?:string;command?:string;exit_code?:number}}; workers?:Array<{id:string;name:string;status:string;changed_files:string[]}>; workspace?:string; files?:string[]; summary:string; error?:string; agents:Array<{name:string;status:string;assignment:string;result:string;model?:string}>; events:Array<{agent:string;text:string;at:string}> };
+// Only what the provider reported is shown. A missing figure stays absent rather
+// than becoming a zero the operator would read as free.
+function usageLine(usage:Usage|undefined){
+ const totals=usage?.totals;
+ if(!totals?.calls) return "";
+ const tokens=(totals.prompt_tokens||0)+(totals.completion_tokens||0);
+ const parts=[`${totals.calls} recorded calls`];
+ if(tokens)parts.push(`${tokens.toLocaleString()} tokens`);
+ if(totals.cost)parts.push(`$${totals.cost.toFixed(4)}`);
+ if(totals.unknown_calls)parts.push(`${totals.unknown_calls} with no usage reported`);
+ return parts.join(" · ");
+}
 const agents = [
  {name:"Planner",role:"Plans architecture and milestones",icon:Network},
  {name:"Coder",role:"Builds the solution",icon:Braces},
@@ -21,6 +34,7 @@ export default function Home(){
  const [projectInstructions,setProjectInstructions]=useState("");
  const [repairRound,setRepairRound]=useState(0);
  const [modelCalls,setModelCalls]=useState(0);
+ const [usage,setUsage]=useState<Usage>();
  const [verification,setVerification]=useState<Task["verification"]>();
  const [workers,setWorkers]=useState<NonNullable<Task["workers"]>>([]);
  const [continueFrom,setContinueFrom]=useState<string|null>(null);
@@ -46,6 +60,7 @@ export default function Home(){
  const [files,setFiles]=useState<string[]>([]);
  function applyTask(data:Task){
   setRepairRound(data.repair_round||0);setModelCalls(data.model_calls||0);setVerification(data.verification);
+  setUsage(data.usage);
   setWorkers(data.workers||[]);
   setWorkspace(data.workspace||"");setFiles(data.files||[]);setTaskId(data.id); setRunning(["queued","running"].includes(data.status));setComplete(data.status==="completed");
   setStates(Object.fromEntries(data.agents.map(a=>[a.name,({pending:"idle",running:"working",completed:"done",failed:"failed",cancelled:"cancelled"} as Record<string,AgentState>)[a.status]||"idle"])));
@@ -101,7 +116,7 @@ export default function Home(){
     <header className="topbar"><div className="brand"><span className="brand-mark"><Sparkles size={17}/></span><span>AXIOM</span></div><div className="topbar-actions"><span className={`llm-status ${connected?"connected":""}`}><span/>{connected?"LLM connected":"LLM offline"}</span><button className="icon-button" aria-label="LLM settings" onClick={()=>setSettingsOpen(true)}><Settings size={18}/></button><span className="avatar">RF</span></div></header>
     <aside className="sidebar"><p className="eyebrow">Workspace</p><button className="project-switcher"><span className="project-icon">I</span><span><strong>Axiom</strong><small>4 agents</small></span><ChevronDown size={16}/></button><nav aria-label="Project navigation"><a className={`nav-item ${view==="task"?"active":""}`} href="#task" onClick={(e)=>{e.preventDefault();goTo("task");}}><Bot size={17}/> Control room</a><a className={`nav-item ${view==="activity"?"active":""}`} href="#activity" onClick={(e)=>{e.preventDefault();goTo("activity");}}><Activity size={17}/> Activity</a></nav><div className="sidebar-bottom"><p className="eyebrow">Recent tasks</p>{history.slice(0,8).map(item=><button key={item.id} className="history-task" onClick={()=>void selectTask(item.id)}><strong>{item.summary||item.id.slice(0,8)}</strong><small>{item.status}</small></button>)}</div></aside>
     <section className="workspace">
-      <div className="page-heading"><div><p className="eyebrow">Axiom workspace</p><h1>Control room</h1></div><div className="system-status"><span/> {running?"Agents working":connected?"Backend ready":"Setup required"}</div></div>
+      <div className="page-heading"><div><p className="eyebrow">Axiom workspace</p><h1>Control room</h1></div><div className="system-status"><span/> {running?"Agents working":connected?"Backend ready":"Setup required"}{usageLine(usage)&&` · ${usageLine(usage)}`}</div></div>
       <section className="task-card" id="task"><div className="task-label"><Sparkles size={15}/> New task</div><textarea value={task} onChange={e=>setTask(e.target.value)} placeholder="What should the agents work on?" aria-label="Task description" rows={3}/><details><summary>Project instructions (AGENTS.md)</summary><textarea value={projectInstructions} onChange={e=>setProjectInstructions(e.target.value)} placeholder="Optional: architecture constraints, style, controls, performance targets and project rules shared by every agent." aria-label="Project instructions" maxLength={16000} rows={4} disabled={running}/></details>{continueFrom&&<div className="continue-note">Continues task {continueFrom.slice(0,8)} — its files and reports are copied into this run.<button className="link-button" onClick={()=>setContinueFrom(null)}>Clear</button></div>}{error&&<div className="error-message">{error}</div>}<div className="task-footer"><span>Plan → Build → Check → Review → Repair if needed</span><button className="run-button" onClick={runTask} disabled={running||!task.trim()}>{running?<><span className="spinner"/> Running</>:<><Play size={15} fill="currentColor"/> Run task</>}</button>{running&&<button className="cancel-button" onClick={()=>void cancelTask()}>Cancel</button>}</div></section>
       <div className="section-title"><div><p className="eyebrow">Team</p><h2>Agent workspace</h2></div><span>{running?(workflow.length?`${workflow.length} agents selected`:"Starting task"):complete?"Task complete":"Standing by"}</span></div>
       <div className="agent-grid">{agents.map(({name,role,icon:Icon})=>{const state=states[name];const used=workflow.find(step=>step.agent===name)?.model;return <article className={`agent-card ${state}`} key={name}><div className="agent-top"><span className="agent-icon"><Icon size={18}/></span><span className={`state-dot ${state}`}/></div><h3>{name}</h3><p>{role}</p><small className="agent-model" title={used||""}>{used||""}</small><div className="agent-state">{state==="working"?"Working now":state==="done"?<><Check size={13}/> Complete</>:state==="failed"?"Failed":state==="cancelled"?"Cancelled":"Waiting"}</div></article>})}</div>

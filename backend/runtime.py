@@ -35,6 +35,35 @@ WORK_TOOLS = {"write_file", "edit_file", "delegate_tasks", "inspect_worker", "in
 
 # Reading many different files is diligence; reading the same one five times is a loop.
 MAX_REPEATED_CALLS = 4
+
+# The ledger is operator-facing evidence. It is never sent to an agent, because
+# spending tokens to report tokens would defeat its purpose. The stored call list is
+# bounded so a long run cannot grow every SQLite write; the totals are not.
+USAGE_WINDOW = 200
+USAGE_NUMBERS = ("prompt_tokens", "completion_tokens", "reasoning_tokens", "cached_tokens", "cost")
+
+
+def _reported_number(value):
+    """A number the provider actually sent, or None. Never an estimate."""
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def usage_numbers(message):
+    usage = (message or {}).get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+    prompt = usage.get("prompt_tokens_details")
+    completion = usage.get("completion_tokens_details")
+    prompt = prompt if isinstance(prompt, dict) else {}
+    completion = completion if isinstance(completion, dict) else {}
+    return {
+        "prompt_tokens": _reported_number(usage.get("prompt_tokens")),
+        "completion_tokens": _reported_number(usage.get("completion_tokens")),
+        "reasoning_tokens": _reported_number(completion.get("reasoning_tokens")),
+        "cached_tokens": _reported_number(prompt.get("cached_tokens")),
+        "cost": _reported_number(usage.get("cost")),
+    }
+
+
 INSTRUCTIONS = {
     "Planner": COMMON + """
 You are Planner. You also own architecture: choose the smallest suitable stack,
@@ -125,6 +154,41 @@ class Runtime:
     def model_for(value, role):
         """Each agent can run its own model; the task model is the fallback."""
         return (value.get("models") or {}).get(role) or value["model"]
+
+    def record_usage(self, value, role, label, model, message=None, error=None):
+        """Record one model call from what the provider reported about it.
+
+        A call the provider said nothing about is recorded as unknown. The totals
+        sum the calls that carried numbers, and count the rest, so a run can never
+        look cheaper than it was.
+        """
+        ledger = value.setdefault("usage", {"calls": [], "by_role": {}, "totals": {}})
+        message = message if isinstance(message, dict) else None
+        numbers = usage_numbers(message)
+        entry = {
+            "role": role, "agent": label, "call": len(ledger["calls"]) + 1,
+            "repair_round": value.get("repair_round", 0), "model": model,
+            "resolved_model": (message or {}).get("resolved_model"),
+            "generation_id": (message or {}).get("generation_id"),
+            "attempts": (message or {}).get("attempts"),
+            "latency_ms": (message or {}).get("latency_ms"),
+            "finish_reason": (message or {}).get("finish_reason"),
+            "tool_calls": len((message or {}).get("tool_calls") or []),
+            "error": error,
+            **numbers,
+        }
+        ledger["calls"].append(entry)
+        ledger["calls"] = ledger["calls"][-USAGE_WINDOW:]
+        unknown = numbers["prompt_tokens"] is None and numbers["completion_tokens"] is None
+        for bucket in (ledger["totals"], ledger["by_role"].setdefault(role, {})):
+            bucket["calls"] = bucket.get("calls", 0) + 1
+            bucket["unknown_calls"] = bucket.get("unknown_calls", 0) + (1 if unknown else 0)
+            bucket["errors"] = bucket.get("errors", 0) + (1 if error else 0)
+            bucket["latency_ms"] = bucket.get("latency_ms", 0) + (entry["latency_ms"] or 0)
+            for key in USAGE_NUMBERS:
+                if numbers[key] is not None:
+                    bucket[key] = bucket.get(key, 0) + numbers[key]
+        return entry
 
     async def run(self, value):
         try:
@@ -315,7 +379,13 @@ class Runtime:
                 raise ProviderError("Task exceeded its total model-call budget.")
             value["model_calls"] = value.get("model_calls", 0) + 1
             compact_messages(messages)
-            message = await self.provider.complete(model, messages, tools)
+            try:
+                message = await self.provider.complete(model, messages, tools)
+            except ProviderError as exc:
+                # A failed or retried call is part of what the run cost.
+                self.record_usage(value, role, label, model, error=type(exc).__name__)
+                raise
+            self.record_usage(value, role, label, model, message)
             if not isinstance(message, dict):
                 raise ProviderError("OpenRouter returned an invalid assistant message.")
             calls = message.get("tool_calls") or []
