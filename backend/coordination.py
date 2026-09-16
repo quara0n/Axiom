@@ -2,6 +2,18 @@
 
 import json
 
+# A report handed to another role is bounded. The full report stays in the task
+# record for the operator; sending every role's whole report to every later role is
+# how a short repair grows into a long bill.
+HANDOFF_LIMIT = 6000
+
+
+def handoff_text(text, limit=HANDOFF_LIMIT):
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    return text[:limit] + "\n... truncated for handoff; the full report is in the task record."
+
+
 DEFAULT_PROJECT_INSTRUCTIONS = """# Project collaboration
 
 Build the user's requested product, including the setup needed to run it.
@@ -22,6 +34,9 @@ For larger projects, build a working vertical slice first, then add features and
 polish in small steps. Define module interfaces before splitting implementation.
 Include dependency manifests and launch instructions when the product needs them.
 Avoid placeholders for requested core functionality. Do not rewrite unrelated code.
+Inspect cheaply: take a file outline, then the line ranges you need, and read a whole
+file only when you need all of it. A write or edit answers with the change it made,
+so use that instead of reading the file back.
 
 ## Interactive and game projects
 Plan the core play loop, controls, camera, collision rules, progression, restart,

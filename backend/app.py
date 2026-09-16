@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from dotenv import set_key
 
 from .config import Settings
+from .coordination import handoff_text
 from .provider import OpenRouter, ProviderError
 from .runtime import Runtime
 from .store import ROLES, Store, TERMINAL
@@ -157,7 +158,10 @@ def create_app(settings=None, provider=None):
             value["files"] = seeded
             value["continuation"] = {
                 "task": source["task"], "status": source["status"], "summary": source["summary"],
-                "reports": {agent["name"]: agent["result"] for agent in source["agents"] if agent["result"]},
+                # Reports carried into a new task are bounded for the same reason they are
+                # bounded between roles: the full text stays in the earlier task's record.
+                "reports": {agent["name"]: handoff_text(agent["result"])
+                            for agent in source["agents"] if agent["result"]},
                 "verification": source.get("verification"),
                 "note": (f"Continuing task {source['id']}. Its files are already in this workspace; "
                          "inspect them before changing anything and only redo work that is missing."),

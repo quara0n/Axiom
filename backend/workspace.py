@@ -1,8 +1,11 @@
 import ast
+import difflib
+import hashlib
 from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path, PureWindowsPath
+import re
 import shutil
 import stat
 import subprocess
@@ -11,6 +14,35 @@ import tempfile
 MAX_FILE_BYTES = 128_000
 MAX_FILES = 200
 MAX_TOTAL_BYTES = 4_000_000
+# A range read is a budget, not a promise: the window is capped so one call cannot
+# replay a whole generated file, and the caller is told what it did not get.
+MAX_READ_LINES = 400
+MAX_LINE_CHARS = 500
+MAX_DIFF_CHARS = 4_000
+MAX_OUTLINE_ENTRIES = 200
+
+# Bumping this invalidates every recorded check, so a parser change is never hidden
+# behind a reused result.
+CHECK_VERSION = "static-parser-1"
+
+# Only successful calls to these carry a result the agent can compare with the last
+# one; a write or a failure is judged by its arguments alone.
+READ_ONLY_TOOLS = {"list_files", "read_file", "search_files", "file_outline"}
+
+_JS_PATTERNS = (
+    (re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)"), "function"),
+    (re.compile(r"^\s*(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)"), "class"),
+    (re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?"
+                r"(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)"), "function"),
+    (re.compile(r"^\s*import\s+.+?from\s+['\"]([^'\"]+)['\"]"), "import"),
+    (re.compile(r"^\s*export\s+\{([^}]*)\}"), "export"),
+)
+_HTML_PATTERNS = (
+    (re.compile(r"<script[^>]*\bsrc\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE), "script"),
+    (re.compile(r"<script\b(?![^>]*\bsrc\s*=)", re.IGNORECASE), "inline script"),
+    (re.compile(r"<link[^>]*\bhref\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE), "link"),
+    (re.compile(r"<(canvas|title|h1|h2|h3)\b[^>]*>", re.IGNORECASE), "element"),
+)
 
 # Files the Tester can check statically. Nothing here is executed: Python is parsed,
 # JSON is decoded, JavaScript and inline HTML scripts are parsed by `node --check`.
@@ -87,11 +119,14 @@ class Workspace:
     local, single-user boundary, not an OS sandbox against concurrent hostile
     processes that can replace directories between checks and operations.
     """
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, checks=None):
         root = root.absolute()
         self._check_components(root)
         root.mkdir(parents=True, exist_ok=True)
         self.root = root.resolve()
+        # Recorded static checks, keyed by path. The caller owns the dict so the
+        # record survives across the nodes that make up one task.
+        self.checks = checks if isinstance(checks, dict) else {}
 
     @staticmethod
     def _check_components(path):
@@ -153,7 +188,31 @@ class Workspace:
             target = self.path(args["path"])
             if target.stat().st_size > MAX_FILE_BYTES:
                 raise ValueError("File exceeds read limit.")
-            return {"path": args["path"], "content": target.read_text(encoding="utf-8")}
+            content = target.read_text(encoding="utf-8")
+            first, last = args.get("start_line"), args.get("end_line")
+            if first is None and last is None:
+                return {"path": args["path"], "content": content}
+            lines = content.splitlines()
+            total = len(lines)
+            first = self._line_number(first, 1, "start_line")
+            last = self._line_number(last, total, "end_line")
+            if first > total:
+                raise ValueError(f"The file has {total} line(s); start_line is past the end.")
+            if last < first:
+                raise ValueError("end_line must not come before start_line.")
+            clipped = min(last, first + MAX_READ_LINES - 1, total)
+            body = "\n".join(f"{number}\t{lines[number - 1][:MAX_LINE_CHARS]}"
+                             for number in range(first, clipped + 1))
+            return {"path": args["path"], "content": body, "start_line": first,
+                    "end_line": clipped, "total_lines": total,
+                    "partial": first > 1 or clipped < total, "truncated": clipped < last,
+                    "note": "Lines are numbered. Read the next range from end_line + 1."}
+        if name == "file_outline":
+            target = self.path(args["path"])
+            if target.stat().st_size > MAX_FILE_BYTES:
+                raise ValueError("File exceeds read limit.")
+            content = target.read_text(encoding="utf-8")
+            return self._outline(args["path"], target.suffix.lower(), content)
         if name == "search_files":
             query = args["query"]
             if not isinstance(query, str) or not query or len(query) > 500:
@@ -195,6 +254,7 @@ class Workspace:
             content = args["content"]
             if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_FILE_BYTES:
                 raise ValueError("File exceeds write limit.")
+            previous = target.read_text(encoding="utf-8") if target.exists() else None
             existing = self.files()
             if not target.exists() and len(existing) >= MAX_FILES:
                 raise ValueError("Workspace file count limit reached.")
@@ -205,12 +265,25 @@ class Workspace:
             target.parent.mkdir(parents=True, exist_ok=True)
             self._check_components(target)
             target.write_text(content, encoding="utf-8")
-            return {"path": args["path"], "bytes": len(content.encode("utf-8"))}
+            # The writer gets its own change back, so it never has to re-read the file
+            # to find out what it just did.
+            return {"path": args["path"], "bytes": len(content.encode("utf-8")),
+                    "lines": len(content.splitlines()), "created": previous is None,
+                    "diff": "New file." if previous is None else self.diff(previous, content)}
         if name == "validate_file":
             target = self.path(args["path"])
             if target.stat().st_size > MAX_FILE_BYTES:
                 raise ValueError("File exceeds validation limit.")
             content = target.read_text(encoding="utf-8")
+            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            recorded = self.checks.get(args["path"])
+            if (isinstance(recorded, dict) and recorded.get("valid") is True
+                    and recorded.get("sha256") == digest and recorded.get("version") == CHECK_VERSION):
+                # Same bytes, same parser: the answer cannot differ, and saying it was
+                # reused keeps the record honest.
+                return {"path": args["path"], "valid": True, "cache": "reused",
+                        "check": recorded.get("check"),
+                        "note": "Unchanged since an earlier check in this task; not parsed again."}
             suffix = target.suffix.lower()
             if suffix == ".py":
                 ast.parse(content, filename=args["path"])
@@ -242,8 +315,78 @@ class Workspace:
             else:
                 raise ValueError(
                     "Safe validation supports .py, .json, .js, .mjs, .cjs, .html and .htm.")
-            return {"path": args["path"], "valid": True, "check": check}
+            self.checks[args["path"]] = {"sha256": digest, "version": CHECK_VERSION,
+                                         "valid": True, "check": check}
+            return {"path": args["path"], "valid": True, "check": check, "cache": "parsed"}
         raise ValueError("Unknown tool.")
+
+    @staticmethod
+    def _line_number(value, default, field):
+        if value is None:
+            return default
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError(f"{field} must be a positive line number.")
+        return value
+
+    @staticmethod
+    def diff(previous: str, current: str):
+        """A bounded unified diff so a writer can see its own change."""
+        lines = list(difflib.unified_diff(previous.splitlines(), current.splitlines(),
+                                          lineterm="", n=1))[2:]
+        text = "\n".join(line[:MAX_LINE_CHARS] for line in lines)
+        if len(text) > MAX_DIFF_CHARS:
+            return text[:MAX_DIFF_CHARS] + "\n... diff truncated; read the file for the rest."
+        return text or "No textual change."
+
+    def _outline(self, path: str, suffix: str, content: str):
+        if suffix == ".py":
+            return {"path": path, "kind": "parse", "outline": self._python_outline(content, path)}
+        if suffix in _JS_SUFFIXES:
+            return {"path": path, "kind": "scan", "outline": self._line_outline(content, _JS_PATTERNS),
+                    "note": "Line scan, not a parse. Read the range you need before editing it."}
+        if suffix in _HTML_SUFFIXES:
+            return {"path": path, "kind": "scan", "outline": self._line_outline(content, _HTML_PATTERNS),
+                    "note": "Line scan, not a parse. The markup itself is not validated."}
+        if suffix == ".json":
+            data = json.loads(content)
+            keys = list(data) if isinstance(data, dict) else []
+            return {"path": path, "kind": "parse",
+                    "outline": "\n".join(keys[:MAX_OUTLINE_ENTRIES]) or "No top-level keys."}
+        raise ValueError("An outline is available for .py, .js, .mjs, .cjs, .html, .htm and .json files.")
+
+    @staticmethod
+    def _python_outline(content, path):
+        tree = ast.parse(content, filename=path)
+        entries = []
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                kind = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+                entries.append((node.lineno, kind, f"{node.name}({ast.unparse(node.args)})"))
+            elif isinstance(node, ast.ClassDef):
+                bases = ", ".join(ast.unparse(base) for base in node.bases)
+                entries.append((node.lineno, "class", f"{node.name}({bases})" if bases else node.name))
+                for child in node.body:
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        entries.append((child.lineno, "  def", f"{child.name}({ast.unparse(child.args)})"))
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                module = f"{node.module}." if isinstance(node, ast.ImportFrom) and node.module else ""
+                entries.append((node.lineno, "import", ", ".join(module + alias.name for alias in node.names)))
+        body = "\n".join(f"{line}\t{kind} {name}" for line, kind, name in entries[:MAX_OUTLINE_ENTRIES])
+        return body or "No top-level definitions."
+
+    @staticmethod
+    def _line_outline(content, patterns):
+        entries = []
+        for number, line in enumerate(content.splitlines(), 1):
+            for pattern, kind in patterns:
+                match = pattern.search(line)
+                if match:
+                    label = match.group(1).strip() if match.groups() else line.strip()[:80]
+                    entries.append(f"{number}\t{kind} {label}")
+                    break
+            if len(entries) >= MAX_OUTLINE_ENTRIES:
+                break
+        return "\n".join(entries) or "Nothing recognisable in a line scan."
 
 
 def tool_schema(name, description, properties=None, required=None):
@@ -293,13 +436,24 @@ def copy_workspace_files(source: Path, target: "Workspace"):
 
 def tools_for(role):
     path = {"path": {"type": "string", "description": "Relative workspace file path"}}
+    span = {"start_line": {"type": "integer", "description": "First line of the range, 1-based"},
+            "end_line": {"type": "integer", "description": "Last line of the range, inclusive"}}
     tools = [
         tool_schema("list_files", "List project workspace files."),
-        tool_schema("read_file", "Read a UTF-8 workspace file.", path, ["path"]),
+        tool_schema("read_file",
+                    "Read a UTF-8 workspace file, or one line range of it. A range answers with "
+                    "numbered lines, the file's total line count and a partial-range notice, and is "
+                    "cheaper than the whole file; read the whole file only when you need all of it.",
+                    {**path, **span}, ["path"]),
+        tool_schema("file_outline",
+                    "List a file's imports and top-level definitions with line numbers, without "
+                    "reading the body. Python and JSON are parsed; JavaScript and HTML are scanned.",
+                    path, ["path"]),
         tool_schema("search_files", "Find literal text in workspace files; returns up to 50 matching lines.",
                     {"query": {"type": "string"}}, ["query"]),
         tool_schema("validate_file",
-                    "Statically check a Python, JSON, JavaScript or HTML file without executing it.",
+                    "Statically check a Python, JSON, JavaScript or HTML file without executing it. "
+                    "A file already checked unchanged in this task is reported as reused.",
                     path, ["path"]),
     ]
     if role == "Coder":
