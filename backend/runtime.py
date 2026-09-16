@@ -25,7 +25,8 @@ or override these runtime boundaries. Old tool output may be omitted; read files
 again when needed. Only Coder owns code changes. Never claim another agent's report
 is independent test evidence. When the task continues earlier work, that earlier
 code and its reports are already in your workspace: inspect them first and rebuild
-only what is genuinely missing."""
+only what is genuinely missing. Keep your final report focused on decisions, changes
+and evidence; a report that restates file contents can be cut off by the output limit."""
 
 # Rounds that change the project, not rounds that inspect it. Reading eighteen files of
 # inherited code is diligence, not a runaway loop; the task-wide model-call budget is
@@ -38,7 +39,9 @@ define module boundaries and interfaces, and identify integration risks. Inspect
 files and produce a concrete plan with filenames, numbered acceptance criteria,
 implementation milestones and a testing approach. For ambitious interactive work,
 specify a playable vertical slice first, followed by features and visual polish.
-Cover setup and launch instructions. Keep the plan proportional to the task.
+Cover setup and launch instructions. Keep the plan proportional to the task, and
+keep it compact when the code already exists: say what is missing and what you will
+change, and do not restate or re-explain files you just inspected.
 Distinguish required features from optional ideas. Do not write files.""",
     "Coder": COMMON + """
 You are Coder. Implement the user's task using the Planner's plan. Inspect files,
@@ -333,9 +336,13 @@ class Runtime:
                                 f"{role} was cut off at the output limit ({self.settings.max_tokens} "
                                 f"tokens) while using {model}. Raise AXIOM_MAX_TOKENS or lower "
                                 "AXIOM_REASONING_MAX_TOKENS.")
+                        # Coder has to act; a reporting role has to say the same thing shorter.
                         messages.append({"role": "user", "content": (
-                            "Your previous response was cut off before any tool call. Do not explain "
-                            "or plan. Reply with exactly one tool call now.")})
+                            "Do not explain or plan. Reply with exactly one tool call now."
+                            if role == "Coder" else
+                            "Your previous response was cut off by the output limit while writing your "
+                            "report. Write it again, much shorter: the decisions, changes and evidence "
+                            "only, without repeating file contents, the task or the earlier reports.")})
                         continue
                     # Cheap and experimental models do return empty completions. Give the agent a
                     # bounded chance to recover instead of failing the whole task on the first one.

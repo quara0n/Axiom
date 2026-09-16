@@ -385,6 +385,47 @@ def test_cut_off_response_is_retried_with_a_corrective_nudge(tmp_path):
         assert value["files"] == ["AGENTS.md", "main.py"]
 
 
+def test_cut_off_reporting_role_is_asked_for_a_shorter_report(tmp_path):
+    class NudgeRecorder(MockProvider):
+        def __init__(self):
+            super().__init__()
+            self.nudges, self.cut = [], False
+
+        async def complete(self, model, messages, tools):
+            role = next(name for name in ("Planner", "Coder", "Tester", "Reviewer")
+                        if f"You are {name}." in messages[0]["content"])
+            last = messages[-1]
+            if last["role"] == "user" and last["content"].startswith(
+                    ("Do not explain", "Your previous response was cut off")):
+                self.nudges.append((role, last["content"]))
+            if role == "Planner" and not self.cut:
+                self.cut = True
+                return {"content": None, "finish_reason": "length"}
+            if not any(message["role"] == "tool" for message in messages):
+                name, args = {
+                    "Planner": ("list_files", {}),
+                    "Coder": ("write_file", {"path": "main.py", "content": "print('hello')\n"}),
+                    "Tester": ("validate_file", {"path": "main.py"}),
+                    "Reviewer": ("read_file", {"path": "main.py"}),
+                }[role]
+                return {"content": None, "tool_calls": [{
+                    "id": role, "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)}}]}
+            result = f"{role} complete; static checks only."
+            return {"content": json.dumps({"verdict": "approved", "summary": result})
+                    if role == "Reviewer" else result}
+
+    provider = NudgeRecorder()
+    with TestClient(create_app(settings(tmp_path), provider)) as client:
+        task_id = client.post("/api/tasks", json={"task": "Write a program"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "completed", value
+    assert provider.nudges, "the cut-off Planner should have been nudged"
+    role, text = provider.nudges[0]
+    assert role == "Planner"
+    assert "much shorter" in text
+
+
 def test_each_agent_can_use_its_own_model(tmp_path):
     provider = MockProvider()
     with TestClient(create_app(settings(tmp_path), provider)) as client:
