@@ -132,6 +132,20 @@ class Workspace:
                     raise ValueError("Workspace file count limit exceeded.")
         return sorted(paths)
 
+    def error_message(self, exc):
+        """Return useful parser feedback while redacting local workspace/temp roots."""
+        if isinstance(exc, SyntaxError):
+            return f"Syntax error at line {exc.lineno}, column {exc.offset}: {exc.msg}"
+        if isinstance(exc, OSError):
+            return "File operation failed. Check that the relative path exists and is accessible."
+        if isinstance(exc, (KeyError, TypeError)):
+            return "Invalid tool arguments. Check the tool schema and required fields."
+        message = str(exc)
+        for path in (str(self.root), tempfile.gettempdir()):
+            message = message.replace(path, "<workspace-or-temp>")
+            message = message.replace(path.replace("\\", "/"), "<workspace-or-temp>")
+        return message[:1500]
+
     def call(self, name: str, args: dict, role: str):
         if name == "list_files":
             return {"files": self.files()}
@@ -140,10 +154,44 @@ class Workspace:
             if target.stat().st_size > MAX_FILE_BYTES:
                 raise ValueError("File exceeds read limit.")
             return {"path": args["path"], "content": target.read_text(encoding="utf-8")}
+        if name == "search_files":
+            query = args["query"]
+            if not isinstance(query, str) or not query or len(query) > 500:
+                raise ValueError("Search requires a nonempty literal query of at most 500 characters.")
+            matches = []
+            for filename in self.files():
+                target = self.path(filename)
+                if target.stat().st_size > MAX_FILE_BYTES:
+                    continue
+                try:
+                    lines = target.read_text(encoding="utf-8").splitlines()
+                except UnicodeError:
+                    continue
+                for number, line in enumerate(lines, 1):
+                    if query in line:
+                        matches.append({"path": filename, "line": number, "text": line[:500]})
+                        if len(matches) >= 50:
+                            return {"matches": matches, "truncated": True}
+            return {"matches": matches, "truncated": False}
+        if name == "edit_file":
+            if role != "Coder":
+                raise ValueError("Only Coder can edit project files.")
+            target = self.path(args["path"])
+            if target.stat().st_size > MAX_FILE_BYTES:
+                raise ValueError("File exceeds edit limit.")
+            old, new = args["old_text"], args["new_text"]
+            if not isinstance(old, str) or not old or not isinstance(new, str):
+                raise ValueError("old_text must be nonempty and new_text must be a string.")
+            content = target.read_text(encoding="utf-8")
+            if content.count(old) != 1:
+                raise ValueError("old_text must match exactly once. Read the current file and include more context.")
+            return self.call("write_file", {"path": args["path"], "content": content.replace(old, new, 1)}, role)
         if name == "write_file":
             if role != "Coder":
                 raise ValueError("Only Coder can write project files.")
             target = self.path(args["path"])
+            if target.name.lower() == "agents.md":
+                raise ValueError("AGENTS.md is project guidance owned by the user and runtime, not the Coder.")
             content = args["content"]
             if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_FILE_BYTES:
                 raise ValueError("File exceeds write limit.")
@@ -211,6 +259,8 @@ def tools_for(role):
     tools = [
         tool_schema("list_files", "List project workspace files."),
         tool_schema("read_file", "Read a UTF-8 workspace file.", path, ["path"]),
+        tool_schema("search_files", "Find literal text in workspace files; returns up to 50 matching lines.",
+                    {"query": {"type": "string"}}, ["query"]),
         tool_schema("validate_file",
                     "Statically check a Python, JSON, JavaScript or HTML file without executing it.",
                     path, ["path"]),
@@ -218,4 +268,7 @@ def tools_for(role):
     if role == "Coder":
         tools.append(tool_schema("write_file", "Create or replace a UTF-8 workspace file.",
                                  {**path, "content": {"type": "string"}}, ["path", "content"]))
+        tools.append(tool_schema("edit_file", "Replace one exact occurrence in an existing file. Read it first; ambiguous matches are rejected.",
+                                 {**path, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
+                                 ["path", "old_text", "new_text"]))
     return tools

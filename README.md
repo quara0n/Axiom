@@ -1,3 +1,98 @@
+# Axiom agent dashboard
+
+## Python agent runtime
+
+Install and run the backend from the project root (Python 3.11+):
+
+```sh
+python -m pip install -e ".[test]"
+python -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+python -m pytest backend/tests -q
+```
+
+See `.env.example` for OpenRouter and runtime settings.
+
+A key entered in the dashboard's LLM settings is stored in `.axiom/credentials.env`
+rather than `.env`. `next dev` watches `.env*` and reloads the page whenever one
+changes, which interrupted the save and left the dialog hanging on "Saving
+connection…". A key set in the real environment or in `.env` still takes precedence.
+
+`backend/runtime.py` uses a compiled LangGraph `StateGraph`:
+
+```text
+START -> Planner -> Coder -> static checks -> Tester -> Reviewer -> decision
+                      ^                                             |
+                      +------------ repair findings ----------------+
+                                                                    |
+                                                                   END
+```
+
+Planner owns architecture, module interfaces, acceptance criteria and milestones.
+Coder is the sole code writer and integrates the product. Tester and Reviewer
+inspect the result independently of Coder; they do not write competing versions.
+Static validation runs before their reports, so failures are available as evidence.
+Reviewer rejection or parser failures return the findings to Coder, followed by
+fresh validation, testing and review. The plan is retained instead of regenerated.
+
+`AXIOM_MAX_REPAIR_ROUNDS` defaults to 2 additional passes (0 disables repair).
+Unchanged files after an unsuccessful repair stop the loop early.
+`AXIOM_MAX_MODEL_CALLS` caps calls across the entire task, including repairs.
+The API records `round_history`, `repair_round`, `model_calls`, and `verification`.
+Each invocation has separate task state and prior reports. Agents retain their
+individual model selection and bounded workspace tool loops.
+These checks parse source; they do not execute generated applications.
+Timeouts, cancellation, concurrency limits and SQLite task/event snapshots remain
+managed by the local runtime. No LangGraph server or LangSmith account is required.
+
+### Coder subagents
+
+For larger tasks the Lead Coder can call `delegate_tasks` to run up to three
+independent work packages in isolated workspace copies, each with explicit file
+ownership that `write_file` and `edit_file` enforce. A subagent cannot delegate
+further and cannot write outside its owned files. Its result is a proposal, not
+integrated code: the Lead Coder must inspect every changed file and then integrate
+it. Integration re-parses supported files and refuses a proposal whose original
+changed in the meantime.
+
+Subagent calls share the task's model-call budget. `AXIOM_MAX_WORKERS` bounds how
+many subagents run at once and how many fit in one delegation call;
+`AXIOM_MAX_SUBAGENTS_PER_TASK` bounds the total per task. The isolated copies live
+under `<workspace root>/.workers/<task>` and are deleted when the task ends; the
+durable per-subagent reports stay in SQLite.
+
+### Shared project guidance
+
+New workspaces receive an `AGENTS.md` with common collaboration rules. Optional
+project instructions entered in the dashboard (or the `project_instructions` task
+API field) are appended. The runtime reads and snapshots this file before running
+agents and includes the same instructions in every handoff. An existing root
+AGENTS.md is preserved. Coder cannot rewrite guidance to relax its own constraints.
+Only the task workspace's root AGENTS.md is loaded; repository-root and nested
+AGENTS.md files are not automatically inherited by generated projects.
+
+The default guidance covers playable vertical slices, game controls, camera,
+visual direction and performance considerations for interactive projects. It is
+guidance, not evidence that those requirements have been implemented or tested.
+`search_files` locates literal text, and `edit_file` replaces one exact occurrence
+to avoid rewriting large files for small repairs. Old tool payloads are compacted
+when context grows; agents can re-read files when needed.
+
+### Remaining capabilities
+
+For ambitious 3D games, the next major capability is an isolated execution worker
+that can install dependencies and build the project, plus a browser worker that
+can inspect screenshots, exercise controls and capture console errors. Those
+workers need explicit evidence tied to the code revision being reviewed. Neither
+worker is implemented here: the dashboard labels runtime and visual behavior as
+unverified even when static review passes. A Maintenance role would be a separate,
+targeted workflow rather than an extra mandatory hop for every feature.
+
+There is no checkpoint resume or human approval pause. After a backend restart,
+unfinished tasks are marked failed and must be submitted again. Generated files
+and SQLite reports remain on disk.
+
+---
+
 # vinext-starter
 
 A clean full-stack starter running on [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and Drizzle support.

@@ -80,7 +80,7 @@ def test_real_api_persistence_and_all_agent_tool_loops(tmp_path):
         value = wait_task(client, task_id)
         assert value["status"] == "completed", value
         assert [agent["status"] for agent in value["agents"]] == ["completed"] * 4
-        assert value["files"] == ["main.py"]
+        assert value["files"] == ["AGENTS.md", "main.py"]
         assert Path(value["workspace"]) == config.workspace_root / task_id
         assert len(provider.calls) == 8
         assert "Reviewer complete" in value["summary"]
@@ -121,6 +121,7 @@ def test_missing_key_and_cross_origin_mutation(tmp_path):
 
 def test_local_connection_saves_key_without_exposing_it(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AXIOM_CREDENTIALS", str(tmp_path / ".axiom" / "credentials.env"))
     key = "test-openrouter-key"
     with TestClient(create_app(settings(tmp_path, api_key=""))) as client:
         assert client.get("/api/health").json()["configured"] is False
@@ -131,7 +132,21 @@ def test_local_connection_saves_key_without_exposing_it(tmp_path, monkeypatch):
         assert response.json() == {"configured": True, "model": "openrouter/free"}
         assert client.get("/api/health").json()["configured"] is True
         assert key not in json.dumps(client.get("/api/health").json())
-        assert key in (tmp_path / ".env").read_text()
+        # The key must not land in .env: `next dev` reloads the dashboard when a
+        # watched .env file changes, which interrupted the save.
+        assert key in (tmp_path / ".axiom" / "credentials.env").read_text()
+        assert not (tmp_path / ".env").exists()
+
+
+def test_saved_key_is_loaded_but_the_environment_still_wins(tmp_path, monkeypatch):
+    credentials = tmp_path / "saved.env"
+    credentials.write_text("OPENROUTER_API_KEY='saved-in-dashboard'\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AXIOM_CREDENTIALS", str(credentials))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    assert Settings.from_env().api_key == "saved-in-dashboard"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-the-environment")
+    assert Settings.from_env().api_key == "from-the-environment"
 
 
 @pytest.mark.parametrize("path", [
@@ -274,7 +289,7 @@ def test_empty_response_is_retried_before_failing(tmp_path):
         task_id = client.post("/api/tasks", json={"task": "Create hello world"}).json()["id"]
         value = wait_task(client, task_id)
         assert value["status"] == "completed", value
-        assert value["files"] == ["main.py"]
+        assert value["files"] == ["AGENTS.md", "main.py"]
 
 
 def test_repeated_empty_responses_fail_and_name_the_model(tmp_path):
@@ -348,7 +363,7 @@ def test_cut_off_response_is_retried_with_a_corrective_nudge(tmp_path):
         task_id = client.post("/api/tasks", json={"task": "Create hello world"}).json()["id"]
         value = wait_task(client, task_id)
         assert value["status"] == "completed", value
-        assert value["files"] == ["main.py"]
+        assert value["files"] == ["AGENTS.md", "main.py"]
 
 
 def test_each_agent_can_use_its_own_model(tmp_path):
@@ -407,3 +422,38 @@ def test_task_timeout(tmp_path):
         value = wait_task(client, task_id)
         assert value["status"] == "failed"
         assert "time limit" in value["error"]
+
+
+def test_graph_keeps_concurrent_task_context_isolated(tmp_path):
+    from backend.runtime import Runtime
+
+    class ContextProvider(MockProvider):
+        async def complete(self, model, messages, tools):
+            response = await super().complete(model, messages, tools)
+            if not response.get("tool_calls"):
+                task = json.loads(messages[1]["content"])["task"]
+                content = response["content"]
+                if "You are Reviewer." in messages[0]["content"]:
+                    report = json.loads(content)
+                    report["summary"] += " " + task
+                    response["content"] = json.dumps(report)
+                else:
+                    response["content"] += " " + task
+            return response
+
+    config, provider = settings(tmp_path), ContextProvider(delay=0.001)
+    store = Store(config.database)
+    runtime = Runtime(config, store, provider)
+    values = [store.create(task, "test/model") for task in ("alpha", "beta")]
+
+    async def run_both():
+        await asyncio.gather(*(runtime.run(value) for value in values))
+
+    asyncio.run(run_both())
+    assert all(store.get(value["id"])["status"] == "completed" for value in values)
+    roles = ("Planner", "Coder", "Tester", "Reviewer")
+    for _, messages, _ in provider.calls:
+        context = json.loads(messages[1]["content"])
+        role = next(role for role in roles if f"You are {role}." in messages[0]["content"])
+        assert list(context["prior_results"]) == list(roles[:roles.index(role)])
+        assert all(result.endswith(context["task"]) for result in context["prior_results"].values())

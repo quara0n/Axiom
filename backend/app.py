@@ -1,7 +1,6 @@
 from contextlib import asynccontextmanager
 import ipaddress
 import re
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +20,7 @@ class TaskRequest(BaseModel):
     task: str = Field(min_length=1, max_length=20000)
     model: str | None = Field(default=None, max_length=200)
     models: dict[str, str] | None = None
+    project_instructions: str = Field(default="", max_length=16000)
 
 
 class ConnectionRequest(BaseModel):
@@ -34,7 +34,11 @@ def create_app(settings=None, provider=None):
     async def lifespan(app):
         app.state.store = Store(settings.database)
         app.state.store.recover()
-        app.state.provider = provider or OpenRouter(settings.api_key, max_tokens=settings.max_tokens)
+        app.state.provider = provider or OpenRouter(
+            settings.api_key, max_tokens=settings.max_tokens,
+            reasoning_max_tokens=settings.reasoning_max_tokens,
+            request_timeout=settings.request_timeout,
+        )
         app.state.api_key = settings.api_key
         app.state.runtime = Runtime(settings, app.state.store, app.state.provider)
         yield
@@ -79,7 +83,10 @@ def create_app(settings=None, provider=None):
         if not isinstance(provider, OpenRouter):
             raise HTTPException(501, "This provider cannot update its key.")
         try:
-            set_key(str(Path.cwd() / ".env"), "OPENROUTER_API_KEY", key)
+            # Write to the runtime's own state directory, never to .env: `next dev`
+            # watches .env and would reload the dashboard mid-save.
+            settings.credentials.parent.mkdir(parents=True, exist_ok=True)
+            set_key(str(settings.credentials), "OPENROUTER_API_KEY", key)
         except OSError as exc:
             raise HTTPException(500, "Could not save the API key locally.") from exc
         await provider.configure_key(key)
@@ -118,6 +125,7 @@ def create_app(settings=None, provider=None):
         if len(runtime.jobs) >= 10:
             raise HTTPException(429, "Too many pending tasks. Wait or cancel a task.")
         value = request.app.state.store.create(task, model, per_agent)
+        value["project_instructions"] = body.project_instructions.strip()
         value["workspace"] = str((settings.workspace_root / value["id"]).absolute())
         value["files"] = []
         request.app.state.store.save(value)
