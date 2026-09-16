@@ -230,18 +230,37 @@ def test_provider_error_does_not_expose_secrets():
     asyncio.run(run())
 
 
-def test_tool_round_limit(tmp_path):
+def test_inspection_rounds_are_bounded_by_the_model_call_budget(tmp_path):
     class LoopProvider(MockProvider):
         async def complete(self, model, messages, tools):
             return {"content": None, "tool_calls": [{
                 "id": "loop", "type": "function",
                 "function": {"name": "list_files", "arguments": "{}"},
             }]}
-    with TestClient(create_app(settings(tmp_path, max_tool_rounds=2), LoopProvider())) as client:
+    # Reading files is not a runaway loop: the task-wide call budget stops it, and the
+    # per-agent round limit is reserved for rounds that change the project.
+    with TestClient(create_app(settings(tmp_path, max_tool_rounds=2, max_model_calls=6),
+                               LoopProvider())) as client:
         task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
         value = wait_task(client, task_id)
         assert value["status"] == "failed"
-        assert "tool round limit" in value["error"]
+        assert "model-call budget" in value["error"]
+
+
+def test_work_round_limit_stops_an_agent_that_keeps_changing_the_project(tmp_path):
+    class WriteLoopProvider(MockProvider):
+        async def complete(self, model, messages, tools):
+            return {"content": None, "tool_calls": [{
+                "id": "loop", "type": "function",
+                "function": {"name": "write_file",
+                             "arguments": json.dumps({"path": "main.py", "content": "print(1)\n"})},
+            }]}
+    with TestClient(create_app(settings(tmp_path, max_tool_rounds=2), WriteLoopProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "failed"
+        assert "work round limit" in value["error"]
+        assert "AXIOM_MAX_TOOL_ROUNDS" in value["error"]
 
 
 def test_reviewer_can_reject_implementation(tmp_path):
@@ -330,7 +349,7 @@ def test_max_tokens_setting_is_bounded(monkeypatch):
     assert config.max_tokens == 200000
     assert config.reasoning_max_tokens == 100000
     assert config.request_timeout == 30
-    assert config.max_tool_rounds == 120
+    assert config.max_tool_rounds == 200
     monkeypatch.setenv("AXIOM_MAX_TOKENS", "10")
     assert Settings.from_env().max_tokens == 1024
 

@@ -39,6 +39,10 @@ Unchanged files after an unsuccessful repair stop the loop early.
 `AXIOM_MAX_MODEL_CALLS` caps calls across the entire task, including repairs.
 `AXIOM_TASK_TIMEOUT` defaults to 1800 seconds for the whole task, subagents and
 repair rounds included; a timed-out task keeps the files it already wrote.
+`AXIOM_MAX_TOOL_ROUNDS` counts only rounds that change the project — writes, edits
+and delegation. Reading and validating files does not count, because inspecting an
+inherited codebase is diligence rather than a runaway loop; inspection is bounded by
+`AXIOM_MAX_MODEL_CALLS`.
 The API records `round_history`, `repair_round`, `model_calls`, and `verification`.
 Each invocation has separate task state and prior reports. Agents retain their
 individual model selection and bounded workspace tool loops.

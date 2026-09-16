@@ -26,6 +26,11 @@ again when needed. Only Coder owns code changes. Never claim another agent's rep
 is independent test evidence. When the task continues earlier work, that earlier
 code and its reports are already in your workspace: inspect them first and rebuild
 only what is genuinely missing."""
+
+# Rounds that change the project, not rounds that inspect it. Reading eighteen files of
+# inherited code is diligence, not a runaway loop; the task-wide model-call budget is
+# what bounds inspection.
+WORK_TOOLS = {"write_file", "edit_file", "delegate_tasks", "inspect_worker", "integrate_worker"}
 INSTRUCTIONS = {
     "Planner": COMMON + """
 You are Planner. You also own architecture: choose the smallest suitable stack,
@@ -297,7 +302,8 @@ class Runtime:
         ]
         successful_tools = set()
         nudges = {"empty": 0, "evidence": 0, "truncated": 0}
-        for _ in range(self.settings.max_tool_rounds):
+        work_rounds = 0
+        while work_rounds <= self.settings.max_tool_rounds:
             if value.get("model_calls", 0) >= self.settings.max_model_calls:
                 raise ProviderError("Task exceeded its total model-call budget.")
             value["model_calls"] = value.get("model_calls", 0) + 1
@@ -373,6 +379,8 @@ class Runtime:
                 try:
                     function = call["function"]
                     name = function["name"]
+                    if name in WORK_TOOLS:
+                        work_rounds += 1
                     arguments = function["arguments"]
                     if not isinstance(arguments, str) or len(arguments) > 150000:
                         raise ValueError("Tool arguments exceed limit.")
@@ -401,7 +409,9 @@ class Runtime:
                     self.event(value, label, f"Tool call rejected: {detail or 'invalid call'} ({type(exc).__name__}).")
                 messages.append({"role": "tool", "tool_call_id": call_id,
                                  "content": json.dumps(result, ensure_ascii=False)})
-        raise ProviderError(f"{role} exceeded its tool round limit.")
+        raise ProviderError(
+            f"{role} exceeded its work round limit ({self.settings.max_tool_rounds}) after "
+            "changing the project that many times. Raise AXIOM_MAX_TOOL_ROUNDS or split the task.")
 
     def cancel(self, task_id):
         job = self.jobs.get(task_id)
