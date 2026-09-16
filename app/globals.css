@@ -24,9 +24,23 @@
 .agent-models label{margin-top:10px}
 .agent-model{display:block;margin:-10px 0 12px;color:#5f5f6b;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.6rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .agent-model:empty{display:none}
+
+/* Agent output viser hele rapporten per agentkjøring. Uten et tak vokser lista til
+   tusenvis av piksler og drar hele siden med seg, så oppgavelista forsvinner oppover. */
+.workflow-list{max-height:min(46vh,440px);overflow:auto;padding-right:6px}
+.output-ready{min-width:0}
+/* Hold oppgavelista synlig selv når innholdet i workspace er langt. */
+.sidebar{position:sticky;top:64px;align-self:start;max-height:calc(100vh - 64px);overflow-y:auto;overflow-x:hidden;min-width:0}
+/* Oppdrags-teksten i hvert steg og feil-oppsummeringen fra Reviewer er like lange som
+   hele prompten eller rapporten. Uten tak blir hvert steg flere tusen piksler høyt
+   og drar hele siden ned. Klipp til to linjer; full tekst vises på hover. */
+.workflow-step small,.output-ready h3{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
 .workflow-list .eyebrow{margin:0 0 2px}
 .continue-note{margin:0 0 10px;padding:9px 11px;border:1px solid #35406b;border-radius:9px;background:#151a2c;color:#a9b4d8;font-size:.72rem}
 .link-button{margin-left:8px;border:0;background:transparent;color:#9d94df;font:inherit;font-size:.72rem;cursor:pointer;text-decoration:underline}
 .continue-button{margin-top:14px;padding:8px 11px;border:1px solid #4a5a92;border-radius:8px;background:#1b2340;color:#c3cdf2;font:inherit;font-size:.72rem;cursor:pointer}
 .continue-button:hover{background:#232c4f}
-.history-task{display:flex;flex-direction:column;gap:4px;width:100%;text-align:left;background:transparent;color:inherit;border:0;padding:10px 0;cursor:pointer}.history-task strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px;font-size:14px}.history-task small{color:#999}.agent-result{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.6 monospace;max-height:420px;overflow:auto;margin-top:12px}.workflow-step>div{min-width:0;flex:1}.workspace-path{overflow-wrap:anywhere}.cancel-button{border:1px solid #795658;background:transparent;color:#f6aaaa;padding:9px 14px;border-radius:8px}.agent-card.failed{border-color:#b85454}.state-dot.failed{background:#f87171}.agent-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.task-footer{flex-wrap:wrap;gap:12px}@media(max-width:900px){.agent-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:480px){.agent-grid{grid-template-columns:1fr}}
+.history-task{min-width:0;display:flex;flex-direction:column;gap:4px;width:100%;text-align:left;background:transparent;color:inherit;border:0;padding:10px 0;cursor:pointer}.history-task strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font-size:14px}.history-task small{color:#999}.agent-result{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.6 monospace;max-height:420px;overflow:auto;margin-top:12px}.workflow-step>div{min-width:0;flex:1}.workspace-path{overflow-wrap:anywhere}.cancel-button{border:1px solid #795658;background:transparent;color:#f6aaaa;padding:9px 14px;border-radius:8px}.agent-card.failed{border-color:#b85454}.state-dot.failed{background:#f87171}.agent-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.task-footer{flex-wrap:wrap;gap:12px}@media(max-width:900px){.agent-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:480px){.agent-grid{grid-template-columns:1fr}}
+
+/* Fillista kan bli lang; hold den kort så resultatpanelet ikke vokser. */
+.generated-files{max-height:150px;overflow:auto}
