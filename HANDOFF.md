@@ -55,7 +55,7 @@ The remaining proof is a run that finishes and gets a verdict.
   repair rounds. `4e5f4e80` (Zombiegata) reached Reviewer, was rejected, exercised the
   repair edge (`repair_round: 1`) and then failed on a Coder repeat-loop rather than on a
   limit. What is still unexercised is delegation: `workers` is empty for every task, so
-  no run has used a Coder subagent yet. See `HANDOFF-FOR-ASTRA.md` for the full table.
+  no run has used a Coder subagent yet. See `HANDOFF-AXIOM.md` for the full table.
 - Scope drift is not enforced anywhere. The Coder role prompt deliberately allows
   dependency manifests and build configuration when the product needs them (ADR-011),
   but a task that *forbids* them is not checked, and one run added `package.json` and

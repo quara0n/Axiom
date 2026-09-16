@@ -29,7 +29,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 ## Purpose
 
-Axiom is developed by multiple coding agents and LLM providers (for example Astra and DeepSeek).
+Axiom is developed by multiple coding agents and LLM providers (for example OpenAI and DeepSeek).
 The goal of this file is to preserve engineering intent across model/session changes.
 
 This file is a permanent project contract. Do not rewrite it for each session.
@@ -178,7 +178,7 @@ If work is intentionally left uncommitted, the next agent must inspect `git stat
 
 ## Model/provider switching
 
-Astra, DeepSeek, or another model may be used as the reasoning engine while the same coding harness operates on the repository.
+An OpenAI, DeepSeek, or other model may be used as the reasoning engine while the same coding harness operates on the repository.
 
 Do not assume a new model has access to the prior chat context.
 
