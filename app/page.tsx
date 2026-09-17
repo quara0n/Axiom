@@ -1,10 +1,10 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Activity, Bot, Braces, Check, ChevronDown, FlaskConical, Network, Play, Settings, ShieldCheck, Sparkles, X } from "lucide-react";
+import { Activity, Bot, Braces, Check, ChevronDown, ChevronRight, FlaskConical, Network, Play, Plus, Settings, ShieldCheck, Sparkles, X } from "lucide-react";
 type AgentState = "idle" | "working" | "done" | "failed" | "cancelled";
 type WorkStep = { agent:string; assignment:string; result:string; model?:string };
 type Usage = { totals?:{calls?:number;unknown_calls?:number;prompt_tokens?:number;completion_tokens?:number;reasoning_tokens?:number;cached_tokens?:number;cost?:number;latency_ms?:number} };
-type Task = { id:string; status:string; repair_round?:number; model_calls?:number; usage?:Usage; verification?:{mode:string;runtime_tested:boolean;visually_tested:boolean;execution?:{state?:string;command?:string;exit_code?:number}}; workers?:Array<{id:string;name:string;status:string;changed_files:string[]}>; workspace?:string; files?:string[]; summary:string; error?:string; agents:Array<{name:string;status:string;assignment:string;result:string;model?:string}>; events:Array<{agent:string;text:string;at:string}> };
+type Task = { id:string; status:string; project?:string; repair_round?:number; model_calls?:number; usage?:Usage; verification?:{mode:string;runtime_tested:boolean;visually_tested:boolean;execution?:{state?:string;command?:string;exit_code?:number}}; workers?:Array<{id:string;name:string;status:string;changed_files:string[]}>; workspace?:string; files?:string[]; summary:string; error?:string; agents:Array<{name:string;status:string;assignment:string;result:string;model?:string}>; events:Array<{agent:string;text:string;at:string}> };
 // Only what the provider reported is shown. A missing figure stays absent rather
 // than becoming a zero the operator would read as free.
 function usageLine(usage:Usage|undefined){
@@ -26,6 +26,12 @@ function verificationLabel(verification:Task["verification"]){
  if(execution?.state==="failed") return `The declared check ran and failed with exit code ${execution.exit_code} (${execution.command}). Read the record before trusting this result.`;
  return "Static checks only. Runtime behavior and visuals have not been tested.";
 }
+// A thread is titled by what it was asked to do, the way a chat is. The reviewer's
+// summary only appears once a run has produced one.
+function taskTitle(item:{id:string;task?:string;summary?:string}){
+ const source=(item.task||item.summary||item.id).trim();
+ return source.split("\n")[0].slice(0,90)||item.id.slice(0,8);
+}
 const agents = [
  {name:"Planner",role:"Plans architecture and milestones",icon:Network},
  {name:"Coder",role:"Builds the solution",icon:Braces},
@@ -40,7 +46,12 @@ async function api<T>(path:string, options?:RequestInit):Promise<T>{
 }
 export default function Home(){
  const [task,setTask]=useState("Lag et spillbart sjakkspill med et enkelt og mørkt design");
- const [projectInstructions,setProjectInstructions]=useState("");
+ // A thread is filed under a project, and the composer leaves the screen once the
+ // prompt has been sent: the running task is what the operator is reading then.
+ const [project,setProject]=useState("Axiom");
+ const [composerOpen,setComposerOpen]=useState(true);
+ const [openProjects,setOpenProjects]=useState<Record<string,boolean>>({});
+ const [activeTitle,setActiveTitle]=useState("");
  const [repairRound,setRepairRound]=useState(0);
  const [modelCalls,setModelCalls]=useState(0);
  const [usage,setUsage]=useState<Usage>();
@@ -84,9 +95,9 @@ export default function Home(){
  useEffect(()=>{
   // Remove credentials left by the previous browser-based integration.
   sessionStorage.removeItem("axiom-openrouter-key");
-  void api<{configured:boolean;workspace:string;model:string}>("health").then(health=>{setConnected(health.configured);setWorkspace(health.workspace);setModel(current=>current||localStorage.getItem("axiom-model")||health.model);}).catch(e=>{setConnected(false);setError(e instanceof Error?e.message:"Backend unavailable");}).finally(()=>{try{const saved=localStorage.getItem("axiom-agent-models");if(saved)setAgentModels(JSON.parse(saved) as Record<string,string>);}catch{setAgentModels({});}});
+  void api<{configured:boolean;workspace:string;model:string}>("health").then(health=>{setConnected(health.configured);setWorkspace(health.workspace);setModel(current=>current||localStorage.getItem("axiom-model")||health.model);}).catch(e=>{setConnected(false);setError(e instanceof Error?e.message:"Backend unavailable");}).finally(()=>{try{const saved=localStorage.getItem("axiom-agent-models");if(saved)setAgentModels(JSON.parse(saved) as Record<string,string>);const savedProject=localStorage.getItem("axiom-project");if(savedProject)setProject(savedProject);}catch{setAgentModels({});}});
   let alive=true;
-  void api<{tasks:Task[]}>("tasks").then(data=>{if(!alive||activeId.current)return;setHistory(data.tasks);const saved=localStorage.getItem("axiom-task-id");const current=data.tasks.find(t=>t.id===saved)||data.tasks.find(t=>["queued","running"].includes(t.status));if(current){activeId.current=current.id;applyTask(current);}}).catch(()=>{});
+  void api<{tasks:Task[]}>("tasks").then(data=>{if(!alive||activeId.current)return;setHistory(data.tasks);const saved=localStorage.getItem("axiom-task-id");const current=data.tasks.find(t=>t.id===saved)||data.tasks.find(t=>["queued","running"].includes(t.status));if(current){activeId.current=current.id;setActiveTitle(taskTitle(current));setProject(current.project||"Axiom");setComposerOpen(false);applyTask(current);}}).catch(()=>{});
   return()=>{alive=false;};
  },[]);
  useEffect(()=>{
@@ -113,23 +124,32 @@ export default function Home(){
   if(!connected){setError("Add an OpenRouter API key in LLM settings before running this task.");setSettingsError("");setSettingsOpen(true);return;}
   activeId.current="creating";setTaskId(null);setFiles([]);setRunning(true);setComplete(false);setError("");setEvents([]);setWorkflow([]);setWorkers([]);setSummary("");setRepairRound(0);setModelCalls(0);setVerification(undefined);
   const perAgent=Object.fromEntries(Object.entries(agentModels).filter(([,value])=>value));
-  try{const data=await api<Task>("tasks",{method:"POST",body:JSON.stringify({task,project_instructions:projectInstructions,model:model.trim()||undefined,models:Object.keys(perAgent).length?perAgent:undefined,continue_from:continueFrom||undefined})});activeId.current=data.id;localStorage.setItem("axiom-task-id",data.id);setContinueFrom(null);applyTask(data);}
+  try{const data=await api<Task>("tasks",{method:"POST",body:JSON.stringify({task,project:project.trim()||undefined,model:model.trim()||undefined,models:Object.keys(perAgent).length?perAgent:undefined,continue_from:continueFrom||undefined})});activeId.current=data.id;localStorage.setItem("axiom-task-id",data.id);try{localStorage.setItem("axiom-project",project.trim()||"Axiom");}catch{}setActiveTitle(taskTitle({id:data.id,task}));setComposerOpen(false);setContinueFrom(null);applyTask(data);}
   catch(e){setRunning(false);setError(e instanceof Error?e.message:"Could not start task");}
  }
  async function cancelTask(){if(!taskId)return;try{applyTask(await api<Task>("tasks/"+taskId+"/cancel",{method:"POST"}));}catch(e){setError(e instanceof Error?e.message:"Could not cancel task");}}
-async function selectTask(id:string){activeId.current=id;try{const data=await api<Task>("tasks/"+id);if(activeId.current!==id)return;localStorage.setItem("axiom-task-id",id);applyTask(data);}catch(e){setError(e instanceof Error?e.message:"Could not load task");}}
+async function selectTask(id:string){activeId.current=id;try{const data=await api<Task>("tasks/"+id);if(activeId.current!==id)return;localStorage.setItem("axiom-task-id",id);setActiveTitle(taskTitle(data));setProject(data.project||"Axiom");setComposerOpen(false);applyTask(data);}catch(e){setError(e instanceof Error?e.message:"Could not load task");}}
 // Resume asks the backend to continue this task's workspace on its own, so an
 // interrupted run costs one click instead of a retyped prompt.
  async function resumeTask(){if(!taskId||running)return;setError("");try{const data=await api<Task>("tasks/"+taskId+"/resume",{method:"POST"});activeId.current=data.id;localStorage.setItem("axiom-task-id",data.id);applyTask(data);}catch(e){setError(e instanceof Error?e.message:"Could not resume task");}}
  const [view,setView]=useState<"task"|"activity">("task");
  const goTo=(id:"task"|"activity")=>{setView(id);if(window.location.hash!=="#"+id)window.location.hash=id;window.setTimeout(()=>document.getElementById(id)?.scrollIntoView({block:"start"}),0);};
  useEffect(()=>{const sync=()=>setView(window.location.hash==="#activity"?"activity":"task");sync();window.addEventListener("hashchange",sync);return()=>window.removeEventListener("hashchange",sync);},[]);
-  return <main className="app-shell">
+ // Threads are grouped under a project in the sidebar. A thread filed nowhere reads
+ // as part of the default project rather than disappearing from the list.
+ const projectNames=Array.from(new Set([project.trim()||"Axiom",...history.map(item=>item.project||"Axiom")]));
+ const groups=projectNames.map(name=>({name,tasks:history.filter(item=>(item.project||"Axiom")===name)}));
+ const startNewTask=()=>{
+  activeId.current=null;setTaskId(null);setFiles([]);setEvents([]);setWorkflow([]);setWorkers([]);setSummary("");setComplete(false);setError("");setRunning(false);setVerification(undefined);setRepairRound(0);setModelCalls(0);setUsage(undefined);setTask("");setContinueFrom(null);setActiveTitle("");setComposerOpen(true);
+  try{localStorage.removeItem("axiom-task-id");}catch{}
+  window.setTimeout(()=>document.getElementById("prompt")?.focus(),0);
+ };
+ return <main className="app-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark"><Sparkles size={17}/></span><span>AXIOM</span></div><div className="topbar-actions"><span className={`llm-status ${connected?"connected":""}`}><span/>{connected?"LLM connected":"LLM offline"}</span><button className="icon-button" aria-label="LLM settings" onClick={()=>setSettingsOpen(true)}><Settings size={18}/></button><span className="avatar">RF</span></div></header>
-    <aside className="sidebar"><p className="eyebrow">Workspace</p><button className="project-switcher"><span className="project-icon">I</span><span><strong>Axiom</strong><small>4 agents</small></span><ChevronDown size={16}/></button><nav aria-label="Project navigation"><a className={`nav-item ${view==="task"?"active":""}`} href="#task" onClick={(e)=>{e.preventDefault();goTo("task");}}><Bot size={17}/> Control room</a><a className={`nav-item ${view==="activity"?"active":""}`} href="#activity" onClick={(e)=>{e.preventDefault();goTo("activity");}}><Activity size={17}/> Activity</a></nav><div className="sidebar-bottom"><p className="eyebrow">Recent tasks</p>{history.slice(0,8).map(item=><button key={item.id} className="history-task" onClick={()=>void selectTask(item.id)}><strong>{item.summary||item.id.slice(0,8)}</strong><small>{item.status}</small></button>)}</div></aside>
+    <aside className="sidebar"><p className="eyebrow">Projects</p><button className="project-switcher" onClick={startNewTask}><span className="project-icon">{(project.trim()||"A").slice(0,1).toUpperCase()}</span><span><strong>{project.trim()||"Axiom"}</strong><small>{history.length} thread{history.length===1?"":"s"} · 4 agents</small></span><ChevronDown size={16}/></button><nav aria-label="Project navigation"><a className={`nav-item ${view==="task"?"active":""}`} href="#task" onClick={(e)=>{e.preventDefault();goTo("task");}}><Bot size={17}/> Control room</a><a className={`nav-item ${view==="activity"?"active":""}`} href="#activity" onClick={(e)=>{e.preventDefault();goTo("activity");}}><Activity size={17}/> Activity</a></nav><div className="sidebar-bottom">{groups.map(group=>{const open=openProjects[group.name]!==false;return <div className="project-group" key={group.name}><button className="project-row" aria-expanded={open} onClick={()=>setOpenProjects(current=>({...current,[group.name]:!open}))}>{open?<ChevronDown size={14}/>:<ChevronRight size={14}/>}<span className="project-dot violet"/><strong>{group.name}</strong><small>{group.tasks.length}</small></button>{open&&<div className="thread-list">{group.tasks.map(item=><button key={item.id} title={taskTitle(item)} className={`thread-item ${item.id===taskId?"active":""}`} onClick={()=>void selectTask(item.id)}><span className={`thread-dot ${item.status}`}/><span className="thread-title">{taskTitle(item)}</span></button>)}</div>}</div>;})}{history.length===0&&<p className="sidebar-empty">No threads yet. Write a prompt to start one.</p>}<button className="new-project" onClick={startNewTask}><Plus size={14}/> New thread</button></div></aside>
     <section className="workspace">
       <div className="page-heading"><div><p className="eyebrow">Axiom workspace</p><h1>Control room</h1></div><div className="system-status"><span/> {running?"Agents working":connected?"Backend ready":"Setup required"}{usageLine(usage)&&` · ${usageLine(usage)}`}</div></div>
-      <section className="task-card" id="task"><div className="task-label"><Sparkles size={15}/> New task</div><textarea value={task} onChange={e=>setTask(e.target.value)} placeholder="What should the agents work on?" aria-label="Task description" rows={3}/><details><summary>Project instructions (AGENTS.md)</summary><textarea value={projectInstructions} onChange={e=>setProjectInstructions(e.target.value)} placeholder="Optional: architecture constraints, style, controls, performance targets and project rules shared by every agent." aria-label="Project instructions" maxLength={16000} rows={4} disabled={running}/></details>{continueFrom&&<div className="continue-note">Continues task {continueFrom.slice(0,8)} — its files and reports are copied into this run.<button className="link-button" onClick={()=>setContinueFrom(null)}>Clear</button></div>}{error&&<div className="error-message">{error}</div>}<div className="task-footer"><span>Plan → Build → Check → Review → Repair if needed</span><button className="run-button" onClick={runTask} disabled={running||!task.trim()}>{running?<><span className="spinner"/> Running</>:<><Play size={15} fill="currentColor"/> Run task</>}</button>{running&&<button className="cancel-button" onClick={()=>void cancelTask()}>Cancel</button>}</div></section>
+      {composerOpen?<section className="task-card" id="task"><div className="task-label"><Sparkles size={15}/> {continueFrom?"Continue task":"New task"}</div><textarea id="prompt" value={task} onChange={e=>setTask(e.target.value)} placeholder="What should the agents work on?" aria-label="Task description" rows={3}/><div className="composer-project"><label htmlFor="project-name">Project</label><input id="project-name" list="axiom-projects" value={project} onChange={e=>setProject(e.target.value)} placeholder="Axiom" maxLength={60} disabled={running}/><datalist id="axiom-projects">{projectNames.map(name=><option key={name} value={name}/>)}</datalist></div>{continueFrom&&<div className="continue-note">Continues task {continueFrom.slice(0,8)} — its files and reports are copied into this run.<button className="link-button" onClick={()=>setContinueFrom(null)}>Clear</button></div>}{error&&<div className="error-message">{error}</div>}<div className="task-footer"><span>Plan → Build → Check → Review → Repair if needed</span><button className="run-button" onClick={runTask} disabled={running||!task.trim()}>{running?<><span className="spinner"/> Running</>:<><Play size={15} fill="currentColor"/> Run task</>}</button>{running&&<button className="cancel-button" onClick={()=>void cancelTask()}>Cancel</button>}</div></section>:<section className="task-bar" id="task"><div className="task-bar-info"><span className="task-label"><Sparkles size={15}/> {running?"Running":complete?"Finished":"Thread"}</span><strong title={activeTitle}>{activeTitle||"No thread selected"}</strong>{error&&<span className="task-bar-error">{error}</span>}</div><div className="task-bar-actions">{running&&<button className="cancel-button" onClick={()=>void cancelTask()}>Cancel</button>}<button className="run-button" onClick={startNewTask}><Plus size={15}/> New thread</button></div></section>}
       <div className="section-title"><div><p className="eyebrow">Team</p><h2>Agent workspace</h2></div><span>{running?(workflow.length?`${workflow.length} agents selected`:"Starting task"):complete?"Task complete":"Standing by"}</span></div>
       <div className="agent-grid">{agents.map(({name,role,icon:Icon})=>{const state=states[name];const used=workflow.find(step=>step.agent===name)?.model;return <article className={`agent-card ${state}`} key={name}><div className="agent-top"><span className="agent-icon"><Icon size={18}/></span><span className={`state-dot ${state}`}/></div><h3>{name}</h3><p>{role}</p><small className="agent-model" title={used||""}>{used||""}</small><div className="agent-state">{state==="working"?"Working now":state==="done"?<><Check size={13}/> Complete</>:state==="failed"?"Failed":state==="cancelled"?"Cancelled":"Waiting"}</div></article>})}</div>
       <div className="lower-grid" id="activity">

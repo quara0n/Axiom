@@ -44,3 +44,33 @@
 
 /* Fillista kan bli lang; hold den kort så resultatpanelet ikke vokser. */
 .generated-files{max-height:150px;overflow:auto}
+
+/* Projects hold threads, the way a chat list does: the project is the group, each
+   run under it is one thread. */
+.project-group{display:grid;gap:2px;margin-bottom:6px}
+.project-row{gap:8px;cursor:pointer;padding:7px 8px}
+.project-row strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d8d8e2;font-size:.8rem;font-weight:650}
+.project-row small{color:#6f6f7d;font-size:.7rem}
+.project-row:hover{background:#18181d;color:#fff}
+.thread-list{display:grid;gap:1px;margin-left:9px;padding:2px 0 2px 14px;border-left:1px solid #24242c}
+.thread-item{display:flex;align-items:center;gap:8px;width:100%;min-width:0;border:0;background:transparent;color:#9a9aa6;text-align:left;padding:7px 8px;border-radius:8px;font-size:.78rem;cursor:pointer}
+.thread-item:hover{background:#1a1a21;color:#eee}
+.thread-item.active{background:#1e1c2c;color:#fff;box-shadow:inset 2px 0 var(--violet)}
+.thread-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.thread-dot{flex:none;width:6px;height:6px;border-radius:50%;background:#5a5a66}
+.thread-dot.queued,.thread-dot.running{background:#e7a75d}
+.thread-dot.completed{background:#3ddc97}
+.thread-dot.failed{background:#f87171}
+.sidebar-empty{margin:4px;color:#6a6a76;font-size:.76rem;line-height:1.5}
+
+/* Once a prompt has been sent the composer steps aside and only the running thread
+   stays on screen, with one way back to a fresh prompt. */
+.task-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;border:1px solid #2b2b34;background:#141419;border-radius:13px;padding:13px 15px}
+.task-bar-info{min-width:0;display:flex;flex-direction:column;gap:5px}
+.task-bar-info strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.92rem;font-weight:600}
+.task-bar-actions{flex:none;display:flex;gap:8px}
+.task-bar-error{color:#f6aaaa;font-size:.74rem}
+.composer-project{display:flex;align-items:center;gap:9px;border-top:1px solid #292930;padding-top:11px;color:#73737f;font-size:.72rem}
+.composer-project input{flex:1;min-width:0;border:1px solid #2c2c35;background:#131318;color:#e7e7ef;border-radius:8px;padding:7px 9px;font-size:.78rem;outline:0}
+.composer-project input:focus{border-color:#4a4470}
+@media(max-width:700px){.task-bar{flex-direction:column;align-items:stretch}}
