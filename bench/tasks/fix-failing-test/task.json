@@ -1,0 +1,6 @@
+{
+  "name": "fix-failing-test",
+  "notes": "Repo-localised defect repair. The smallest tier: one module, one visible failing test, a hidden checker that covers the same contract more fully so editing the visible test does not score.",
+  "timeout": 600,
+  "prompt": "The project in this workspace is a small cart-pricing module. `npm test` fails.\n\nFix the defect in src/cart.js so the module behaves correctly, without weakening or deleting the tests in tests/cart.test.js. Do not change the exported function's name or its signature: `total(items, options)` where `items` is an array of `{price, quantity}` and `options` may carry `discountPercent`.\n\nMoney is rounded to whole cents. The input array and its items must not be mutated. Quantities and prices may be zero, and a discount of 100 returns 0.\n"
+}

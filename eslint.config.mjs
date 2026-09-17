@@ -15,6 +15,10 @@ const eslintConfig = defineConfig([
     ".venv/**",
     ".pytest_cache/**",
     ".axiom/**",
+    // Benchmark fixtures are data, not site code: task workspaces, hidden checkers
+    // and golden solutions are executed by the benchmark's own runner.
+    "bench/**",
+    "bench-results/**",
   ]),
   {
     files: ["components/ui/**/*.{ts,tsx}", "hooks/use-mobile.ts"],

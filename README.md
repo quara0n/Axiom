@@ -99,6 +99,25 @@ guidance, not evidence that those requirements have been implemented or tested.
 to avoid rewriting large files for small repairs. Old tool payloads are compacted
 when context grows; agents can re-read files when needed.
 
+### Measuring the harness
+
+`approved` from the Reviewer is a claim made inside the run, so it cannot be the
+number the harness is judged by. `backend/bench.py` supplies the missing half:
+tasks with a grader the harness never sees, a negative control that must fail, a
+golden solution that must pass, and one headline metric - cost and wall-clock per
+solved task.
+
+It runs the same task through two arms: the four-role pipeline and a single-loop
+Pi-class baseline that shares the workspace boundary, the usage ledger and the
+budgets but carries one context and a short instruction block. The difference
+between them is therefore about how many contexts the harness needs, not about
+which tools it has. See `bench/README.md` for the task format, the arm contract
+and the commands.
+
+The checkers grade behaviour they can execute, never how a result looks or feels;
+visual and design judgement stays in the operator's rubric beside the report and
+is never folded into the solve rate.
+
 ### Remaining capabilities
 
 For ambitious 3D games, the next major capability is an isolated execution worker

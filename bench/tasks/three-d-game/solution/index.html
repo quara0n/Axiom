@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Track</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0d1013; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud {
+    position: fixed; top: 16px; left: 16px; font: 14px/1.5 ui-monospace, monospace;
+    color: #e8ecef; text-shadow: 0 1px 2px #000; pointer-events: none;
+  }
+  #hud b { color: #ffd166; }
+  #hint {
+    position: fixed; bottom: 14px; left: 16px; font: 12px/1.5 ui-monospace, monospace;
+    color: #8b959d; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hud"></div>
+<div id="hint">&#8593; throttle &middot; &#8595; brake &middot; &#8592;&#8594; steer &middot; R restart</div>
+<script type="module">
+  import { createGame } from "./src/sim.js";
+
+  const canvas = document.getElementById("view");
+  const context = canvas.getContext("2d");
+  const hud = document.getElementById("hud");
+  const game = createGame();
+
+  const keys = new Set();
+  addEventListener("keydown", (event) => {
+    keys.add(event.key.toLowerCase());
+    if (event.key.toLowerCase() === "r") game.restart();
+    if (event.key.startsWith("Arrow") || event.key === " ") event.preventDefault();
+  });
+  addEventListener("keyup", (event) => keys.delete(event.key.toLowerCase()));
+
+  function resize() {
+    canvas.width = innerWidth * devicePixelRatio;
+    canvas.height = innerHeight * devicePixelRatio;
+  }
+  addEventListener("resize", resize);
+  resize();
+
+  const FOCAL = 420;
+  const CAMERA_BACK = 11;
+  const CAMERA_HEIGHT = 6;
+
+  function project(point, camera) {
+    const dx = point.x - camera.x;
+    const dz = point.z - camera.z;
+    const right = dx * Math.cos(-camera.heading) - dz * Math.sin(-camera.heading);
+    const forward = dx * Math.sin(-camera.heading) + dz * Math.cos(-camera.heading);
+    if (forward <= 0.6) return null;
+    return {
+      x: canvas.width / 2 + (right * FOCAL * devicePixelRatio) / forward,
+      y: canvas.height * 0.42 + (CAMERA_HEIGHT * FOCAL * devicePixelRatio) / forward,
+    };
+  }
+
+  function segment(a, b, camera, colour, width) {
+    const from = project(a, camera);
+    const to = project(b, camera);
+    if (!from || !to) return;
+    context.beginPath();
+    context.moveTo(from.x, from.y);
+    context.lineTo(to.x, to.y);
+    context.strokeStyle = colour;
+    context.lineWidth = width * devicePixelRatio;
+    context.stroke();
+  }
+
+  function draw(camera, state) {
+    context.fillStyle = "#12181d";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "#1b2530";
+    context.fillRect(0, canvas.height * 0.42, canvas.width, canvas.height);
+
+    for (let x = -10; x <= 10; x += 5) {
+      for (let z = -20; z < 40; z += 5) {
+        segment({ x, z }, { x, z: z + 5 }, camera, "#223040", 1);
+      }
+    }
+    for (let z = -20; z <= 40; z += 5) {
+      segment({ x: -10, z }, { x: 10, z }, camera, "#223040", 1);
+    }
+    for (let z = -20; z < 40; z += 5) {
+      segment({ x: -10, z }, { x: -10, z: z + 5 }, camera, "#4a5b6b", 2);
+      segment({ x: 10, z }, { x: 10, z: z + 5 }, camera, "#4a5b6b", 2);
+    }
+    for (let x = -10; x < 10; x += 5) {
+      segment({ x, z: -20 }, { x: x + 5, z: -20 }, camera, "#4a5b6b", 2);
+      segment({ x, z: 40 }, { x: x + 5, z: 40 }, camera, "#4a5b6b", 2);
+    }
+
+    game.checkpoints.forEach((point, index) => {
+      const cleared = index < state.checkpoint;
+      const colour = cleared ? "#3ddc97" : index === state.checkpoint ? "#ffd166" : "#5a6b7b";
+      for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 8) {
+        segment(
+          { x: point.x + Math.cos(angle) * point.radius, z: point.z + Math.sin(angle) * point.radius },
+          { x: point.x + Math.cos(angle + Math.PI / 8) * point.radius, z: point.z + Math.sin(angle + Math.PI / 8) * point.radius },
+          camera, colour, 3);
+      }
+    });
+
+    const { player } = state;
+    const nose = { x: player.x + Math.sin(player.heading) * 1.6, z: player.z + Math.cos(player.heading) * 1.6 };
+    segment(nose, { x: player.x - Math.sin(player.heading) * 1.2, z: player.z - Math.cos(player.heading) * 1.2 },
+            camera, "#ff6b6b", 6);
+  }
+
+  let previous = performance.now();
+  function frame(now) {
+    const dt = Math.min((now - previous) / 1000, 0.05);
+    previous = now;
+    game.step({
+      throttle: keys.has("arrowup") || keys.has("w") ? 1 : 0,
+      brake: keys.has("arrowdown") || keys.has("s") ? 1 : 0,
+      steer: (keys.has("arrowleft") || keys.has("a") ? -1 : 0) + (keys.has("arrowright") || keys.has("d") ? 1 : 0),
+    }, dt);
+
+    const { player, lap, checkpoint } = game.state;
+    const camera = {
+      x: player.x - Math.sin(player.heading) * CAMERA_BACK,
+      z: player.z - Math.cos(player.heading) * CAMERA_BACK,
+      heading: player.heading,
+    };
+    draw(camera, game.state);
+    hud.innerHTML = `lap <b>${lap + 1}</b> &middot; checkpoint <b>${checkpoint}/${game.checkpoints.length}</b>`
+      + ` &middot; speed <b>${player.speed.toFixed(1)}</b>`
+      + (checkpoint === 0 && lap > 0 ? `<br><b>lap ${lap} complete</b>` : "");
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+</script>
+</body>
+</html>

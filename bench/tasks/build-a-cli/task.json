@@ -1,0 +1,6 @@
+{
+  "name": "build-a-cli",
+  "notes": "Build from a written specification into an empty workspace. Graded by running the artefact, not by reading it, so a described-but-unwritten CLI scores zero.",
+  "timeout": 900,
+  "prompt": "Build a command-line tool called `wordcount.py` in the root of this workspace.\n\nContract:\n- `python wordcount.py <path>` prints exactly one JSON object on stdout with the keys `lines`, `words` and `characters`, and nothing else on stdout.\n- `lines` counts lines the way Python's `str.splitlines()` does, so a final line without a trailing newline still counts, and an empty file has 0 lines.\n- `words` counts whitespace-separated tokens.\n- `characters` counts characters in the decoded UTF-8 text, not bytes: a file containing `på` followed by a newline is 3 characters.\n- If the path cannot be read, print a message on stderr and exit with a non-zero status. Do not print a JSON object in that case.\n\nUse only the Python standard library. The tool must work when run from a different working directory than the file it reads.\n"
+}

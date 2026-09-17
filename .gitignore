@@ -57,3 +57,10 @@ workspaces/
 
 .venv-backend/
 .axiom/
+
+# Benchmark artefacts: per-run workspaces, records and reports are reproducible
+# from bench/tasks and are not source.
+/bench-results/
+/bench/tasks/.validation/
+/.bench-debug/
+/.uv-cache/
