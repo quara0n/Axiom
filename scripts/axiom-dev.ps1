@@ -7,6 +7,11 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $run = Join-Path $repo '.run'
 New-Item -ItemType Directory -Path $run -Force | Out-Null
 
+# Serve the page a run wrote, so a finished run can be opened in a browser. This is
+# generated code running in your browser on this machine, not a sandbox; remove this
+# line to keep the preview off.
+$env:AXIOM_ALLOW_PREVIEW = "1"
+
 Start-Process -FilePath (Join-Path $repo '.venv\Scripts\python.exe') `
     -ArgumentList '-m', 'uvicorn', 'backend.app:app', '--host', '127.0.0.1', '--port', '8000' `
     -WorkingDirectory $repo -WindowStyle Hidden `

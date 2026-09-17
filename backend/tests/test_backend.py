@@ -397,6 +397,47 @@ def test_deleting_a_thread_that_is_not_there_is_a_404(tmp_path):
         assert client.delete("/api/tasks/0123456789abcdef0123456789abcdef").status_code == 404
 
 
+def test_the_preview_is_off_until_the_operator_enables_it(tmp_path):
+    """Serving a run's page is a boundary decision, so it is not on by default."""
+    config = settings(tmp_path)
+    with TestClient(create_app(config, MockProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        assert wait_task(client, task_id)["status"] == "completed"
+        response = client.post(f"/api/tasks/{task_id}/preview")
+        assert response.status_code == 409
+        assert "AXIOM_ALLOW_PREVIEW" in response.json()["detail"]
+
+
+def test_the_preview_serves_the_page_the_run_wrote(tmp_path):
+    config = settings(tmp_path, allow_preview=True)
+    with TestClient(create_app(config, MockProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        assert wait_task(client, task_id)["status"] == "completed"
+        (config.workspace_root / task_id / "index.html").write_text(
+            "<h1>it runs</h1>\n", encoding="utf-8")
+
+        response = client.post(f"/api/tasks/{task_id}/preview")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["url"].startswith("http://127.0.0.1:")
+        assert body["url"].endswith("/index.html")
+        assert "not a sandbox" in body["note"]
+
+        served = httpx.get(body["url"], timeout=5)
+        assert served.status_code == 200
+        assert "it runs" in served.text
+
+
+def test_a_run_with_no_page_to_open_says_so(tmp_path):
+    config = settings(tmp_path, allow_preview=True)
+    with TestClient(create_app(config, MockProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        assert wait_task(client, task_id)["status"] == "completed"
+        response = client.post(f"/api/tasks/{task_id}/preview")
+        assert response.status_code == 409
+        assert "no HTML page" in response.json()["detail"]
+
+
 def test_a_thread_is_filed_under_the_project_it_was_started_in(tmp_path):
     with TestClient(create_app(settings(tmp_path), MockProvider())) as client:
         filed = client.post("/api/tasks", json={"task": "Run", "project": "Varg"}).json()

@@ -12,6 +12,7 @@ from dotenv import set_key
 
 from .config import Settings
 from .continuation import prepare_continuation
+from .preview import Preview
 from .provider import OpenRouter, ProviderError
 from .runtime import Runtime
 from .store import ROLES, Store, TERMINAL
@@ -51,6 +52,7 @@ def create_app(settings=None, provider=None):
         )
         app.state.api_key = settings.api_key
         app.state.runtime = Runtime(settings, app.state.store, app.state.provider)
+        app.state.preview = Preview(settings.preview_port)
         # Recovery spends the operator's money, so it happens only when asked for.
         if settings.auto_resume:
             for task_id in interrupted[: settings.max_auto_recovery]:
@@ -69,10 +71,11 @@ def create_app(settings=None, provider=None):
         yield
         await app.state.runtime.close()
         await app.state.provider.close()
+        app.state.preview.stop()
 
     app = FastAPI(title="Axiom local agent runtime", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins),
-                       allow_methods=["GET", "POST"], allow_headers=["Content-Type"])
+                       allow_methods=["GET", "POST", "DELETE"], allow_headers=["Content-Type"])
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
 
     @app.middleware("http")
@@ -226,6 +229,31 @@ def create_app(settings=None, provider=None):
         if re.fullmatch(r"[0-9a-f]{32}", task_id):
             shutil.rmtree(settings.workspace_root / task_id, ignore_errors=True)
         return {"deleted": task_id}
+
+    @app.post("/api/tasks/{task_id}/preview")
+    async def preview(task_id: str, request: Request):
+        """Hand back the address of the page this run wrote.
+
+        The page is served from this machine on its own port, so it is generated code
+        running in the operator's browser — not a sandbox. Off unless the operator
+        enables it.
+        """
+        value = await task(task_id, request)
+        if not settings.allow_preview:
+            raise HTTPException(409, "Preview is off. Set AXIOM_ALLOW_PREVIEW=1 and "
+                                     "restart the backend to serve a run's page.")
+        workspace = settings.workspace_root / value["id"]
+        if not workspace.is_dir():
+            raise HTTPException(404, "That run has no workspace to open.")
+        pages = sorted(path.relative_to(workspace).as_posix()
+                       for path in workspace.rglob("*.html"))
+        if not pages:
+            raise HTTPException(409, "That run wrote no HTML page to open.")
+        entry = "index.html" if (workspace / "index.html").is_file() else pages[0]
+        url = request.app.state.preview.select(workspace)
+        return {"url": url + entry, "pages": pages[:20],
+                "note": "Served from this machine on 127.0.0.1. This is generated "
+                        "code running in your browser, not a sandbox."}
 
     return app
 
