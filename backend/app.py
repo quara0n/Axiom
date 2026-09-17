@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 import ipaddress
 import re
 import shutil
@@ -14,8 +15,10 @@ from .config import Settings
 from .continuation import prepare_continuation
 from .preview import Preview
 from .provider import OpenRouter, ProviderError
+from . import runner
 from .runtime import Runtime
 from .store import ROLES, Store, TERMINAL
+from .workspace import Workspace
 
 MODEL_PATTERN = r"[A-Za-z0-9~][A-Za-z0-9_./:~-]{0,199}"
 
@@ -259,6 +262,30 @@ def create_app(settings=None, provider=None):
         return {"url": url + entry, "pages": pages[:20],
                 "note": "Served from this machine on 127.0.0.1. This is generated "
                         "code running in your browser, not a sandbox."}
+
+    @app.post("/api/tasks/{task_id}/test")
+    async def test_task(task_id: str, request: Request):
+        """Run the checks this project declares, on demand, against a finished thread.
+
+        The run already parses the source; this is the part that actually executes, so
+        it is the same boundary decision as AXIOM_ALLOW_EXECUTION and stays behind it.
+        The result is recorded on the task, because a verification record that only
+        holds what the pipeline happened to do is not the truth about the workspace.
+        """
+        value = await task(task_id, request)
+        if not settings.allow_execution:
+            raise HTTPException(409, "Running a project's own checks is off. Set "
+                                     "AXIOM_ALLOW_EXECUTION=1 and restart the backend.")
+        workspace = Workspace(settings.workspace_root / value["id"],
+                              value.setdefault("checks", {}))
+        outcome = await asyncio.to_thread(runner.execution_outcome, workspace, settings)
+        verification = value.setdefault("verification", {})
+        verification["execution"] = outcome
+        verification["runtime_tested"] = outcome["state"] == "passed"
+        if outcome["state"] != "not_run":
+            verification["mode"] = "static_and_executed"
+        request.app.state.store.save(value)
+        return outcome
 
     return app
 

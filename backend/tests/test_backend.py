@@ -438,6 +438,58 @@ def test_a_run_with_no_page_to_open_says_so(tmp_path):
         assert "no HTML page" in response.json()["detail"]
 
 
+def test_running_a_projects_checks_is_off_until_the_operator_enables_it(tmp_path):
+    config = settings(tmp_path)
+    with TestClient(create_app(config, MockProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        assert wait_task(client, task_id)["status"] == "completed"
+        response = client.post(f"/api/tasks/{task_id}/test")
+        assert response.status_code == 409
+        assert "AXIOM_ALLOW_EXECUTION" in response.json()["detail"]
+
+
+def _declare_a_check(config, task_id, script, body="console.log('ok');\n"):
+    workspace = config.workspace_root / task_id
+    (workspace / "package.json").write_text(
+        json.dumps({"name": "demo", "scripts": {"test": script}}), encoding="utf-8")
+    (workspace / "tests").mkdir(exist_ok=True)
+    (workspace / "tests" / "check.js").write_text(body, encoding="utf-8")
+
+
+def test_running_a_projects_checks_reports_and_records_a_pass(tmp_path):
+    config = settings(tmp_path, allow_execution=True)
+    with TestClient(create_app(config, MockProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        assert wait_task(client, task_id)["status"] == "completed"
+        _declare_a_check(config, task_id, "node tests/check.js")
+
+        body = client.post(f"/api/tasks/{task_id}/test").json()
+        assert body["state"] == "passed"
+        assert body["exit_code"] == 0
+        assert body["intent"] == "tests"
+        assert body["duration_ms"] >= 0
+
+        verification = client.get(f"/api/tasks/{task_id}").json()["verification"]
+        assert verification["runtime_tested"] is True
+        assert verification["mode"] == "static_and_executed"
+
+
+def test_a_failing_check_is_recorded_as_failed_not_as_passed(tmp_path):
+    config = settings(tmp_path, allow_execution=True)
+    with TestClient(create_app(config, MockProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        assert wait_task(client, task_id)["status"] == "completed"
+        _declare_a_check(config, task_id, "node tests/check.js", "process.exit(3);\n")
+
+        body = client.post(f"/api/tasks/{task_id}/test").json()
+        assert body["state"] == "failed"
+        assert body["exit_code"] != 0
+
+        verification = client.get(f"/api/tasks/{task_id}").json()["verification"]
+        assert verification["runtime_tested"] is False
+        assert verification["mode"] == "static_and_executed"
+
+
 def test_a_thread_is_filed_under_the_project_it_was_started_in(tmp_path):
     with TestClient(create_app(settings(tmp_path), MockProvider())) as client:
         filed = client.post("/api/tasks", json={"task": "Run", "project": "Varg"}).json()

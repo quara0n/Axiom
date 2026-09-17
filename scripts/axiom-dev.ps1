@@ -12,6 +12,12 @@ New-Item -ItemType Directory -Path $run -Force | Out-Null
 # line to keep the preview off.
 $env:AXIOM_ALLOW_PREVIEW = "1"
 
+# Let "Test it" run the checks a generated project declares, in its own workspace. That
+# is the project's own test or build command as a local process with no provider
+# credentials — faster feedback than a model call, and not a sandbox. Remove this line
+# to keep execution off.
+$env:AXIOM_ALLOW_EXECUTION = "1"
+
 Start-Process -FilePath (Join-Path $repo '.venv\Scripts\python.exe') `
     -ArgumentList '-m', 'uvicorn', 'backend.app:app', '--host', '127.0.0.1', '--port', '8000' `
     -WorkingDirectory $repo -WindowStyle Hidden `
