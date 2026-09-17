@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<title>Slingshot</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #101521; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud { position: fixed; top: 16px; left: 18px; font: 14px/1.6 ui-monospace, monospace; color: #eaeef5; text-shadow: 0 1px 3px #000; }
+  #hud b { color: #ffd166; }
+  #hint { position: fixed; bottom: 14px; left: 18px; font: 12px/1.6 ui-monospace, monospace; color: #8b97ab; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="hud"></div>
+<div id="hint">dra i spretterten for &#229; sikte &middot; slipp for &#229; skyte &middot; pil opp/ned og mellomrom &middot; R for nytt fors&#248;k</div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

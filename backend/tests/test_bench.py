@@ -88,7 +88,7 @@ def test_partial_credit_is_read_without_rounding_up():
 
 def test_find_tasks_reads_the_shipped_suite():
     names = {task.name for task in find_tasks(DEFAULT_SUITE)}
-    assert names == {"fix-failing-test", "build-a-cli", "three-d-game"}
+    assert names == {"fix-failing-test", "build-a-cli", "three-d-game", "angry-birds"}
 
 
 def test_every_shipped_task_discriminates(tmp_path):
