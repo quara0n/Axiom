@@ -55,7 +55,14 @@
 .thread-list{display:grid;gap:1px;margin-left:9px;padding:2px 0 2px 14px;border-left:1px solid #24242c}
 .thread-item{display:flex;align-items:center;gap:8px;width:100%;min-width:0;border:0;background:transparent;color:#9a9aa6;text-align:left;padding:7px 8px;border-radius:8px;font-size:.78rem;cursor:pointer}
 .thread-item:hover{background:#1a1a21;color:#eee}
-.thread-item.active{background:#1e1c2c;color:#fff;box-shadow:inset 2px 0 var(--violet)}
+.thread-row{display:flex;align-items:center;gap:2px;border-radius:8px}
+.thread-row:hover{background:#1a1a21}
+.thread-row.active{background:#1e1c2c;box-shadow:inset 2px 0 var(--violet)}
+.thread-row .thread-item{flex:1}
+.thread-row.active .thread-item{color:#fff}
+.thread-delete{flex:none;display:grid;place-items:center;width:26px;height:26px;border:0;border-radius:7px;background:transparent;color:#6c6c78;cursor:pointer;opacity:.5}
+.thread-row:hover .thread-delete,.thread-delete:focus-visible{opacity:1}
+.thread-delete:hover{background:#3a2226;color:#f6aaaa}
 .thread-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .thread-dot{flex:none;width:6px;height:6px;border-radius:50%;background:#5a5a66}
 .thread-dot.queued,.thread-dot.running{background:#e7a75d}
@@ -74,3 +81,68 @@
 .composer-project input{flex:1;min-width:0;border:1px solid #2c2c35;background:#131318;color:#e7e7ef;border-radius:8px;padding:7px 9px;font-size:.78rem;outline:0}
 .composer-project input:focus{border-color:#4a4470}
 @media(max-width:700px){.task-bar{flex-direction:column;align-items:stretch}}
+
+/* The project list is the navigation, so it sits directly under the views instead of
+   being pushed to the bottom of the rail. The card that used to sit above it repeated
+   the same projects and counted the wrong project's threads. */
+.sidebar-bottom{margin-top:18px}
+
+/* A thread is titled by a whole instruction, so it truncates rather than stretching
+   the heading across the page. */
+.page-heading h1{max-width:64ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Panels stack in one column. A single panel in a two-column grid rendered at half
+   width with empty space beside it. */
+.workspace>.panel{margin-top:28px}
+
+/* A narrow pane keeps the project list in a drawer. Hiding it entirely, as it used
+   to, meant the only way to change thread disappeared on exactly the widths where
+   the window is smallest. */
+.menu-button{display:none}
+@media(max-width:700px){
+  .menu-button{display:grid}
+  .sidebar{display:flex;position:fixed;top:60px;bottom:0;left:0;width:276px;z-index:40;background:#0d0d10;transform:translateX(-100%);transition:transform .18s ease;overflow-y:auto}
+  .sidebar.open{transform:none;box-shadow:24px 0 60px rgba(0,0,0,.55)}
+  .nav-backdrop{position:fixed;inset:60px 0 0 0;z-index:35;background:rgba(0,0,0,.5)}
+}
+@media(min-width:701px){.nav-backdrop{display:none}}
+
+/* Team progress. The bar counts how many of the four roles have finished, and a
+   running agent reports the tool calls it has made so far. Neither is an estimate:
+   nothing in the runtime knows a true "percentage done". */
+.pipeline{height:3px;margin:12px 0 18px;border-radius:99px;background:#22222a;overflow:hidden}
+.pipeline span{display:block;height:100%;background:#4a4470;transition:width .3s ease}
+.pipeline.live span{background:linear-gradient(90deg,#6550f2,#9d8cff)}
+.agent-progress{display:block;margin-top:8px;color:#8b79ff;font-size:.68rem}
+
+/* Agent activity: a month of runs, and the runs of the chosen day. */
+.calendar-nav{display:flex;align-items:center;gap:8px;margin:18px 0 10px}
+.calendar-nav strong{font-size:.86rem;text-transform:capitalize}
+.calendar-nav .icon-button:first-child svg{transform:rotate(180deg)}
+.calendar-nav .link-button{margin-left:auto}
+.calendar{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:4px}
+.calendar .dow{color:#5f5f6a;font-size:.62rem;text-align:center;padding-bottom:2px}
+.calendar .day{position:relative;aspect-ratio:1;display:grid;place-items:center;border:1px solid var(--line);border-radius:8px;background:#141419;color:#8f8f9b;font:inherit;font-size:.72rem;cursor:pointer}
+.calendar .day.empty{border-color:transparent;background:transparent;cursor:default}
+.calendar .day.has{color:#fff;background:#191922}
+.calendar .day:disabled{cursor:default;opacity:.55}
+.calendar .day.sel{border-color:#6550f2;box-shadow:inset 0 0 0 1px #6550f2}
+.calendar .mark{position:absolute;bottom:5px;width:5px;height:5px;border-radius:50%;background:#8b79ff}
+.calendar .day.good .mark{background:#3ddc97}
+.calendar .day.bad .mark{background:#f87171}
+.run-list{list-style:none;margin:0;padding:6px 10px;max-height:340px;overflow:auto}
+.run-list li+li{border-top:1px solid #1e1e25}
+.run{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:10px;width:100%;border:0;background:transparent;color:inherit;text-align:left;padding:11px 8px;border-radius:9px;font:inherit;cursor:pointer}
+.run:hover{background:#1a1a21}
+.run-main{min-width:0}
+.run-main strong{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.8rem;font-weight:600}
+.run-main small{display:block;margin-top:3px;color:#82828d;font-size:.68rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.run time{color:#5d5d67;font-size:.67rem}
+.run-status{color:#82828d;font-size:.64rem;text-transform:uppercase;letter-spacing:.08em}
+.run-empty{padding:18px 8px;color:#55555f;font-size:.76rem}
+@media(max-width:700px){
+  .calendar{gap:3px}
+  .calendar .day{font-size:.66rem}
+  .run{grid-template-columns:auto minmax(0,1fr) auto}
+  .run-status{display:none}
+}
