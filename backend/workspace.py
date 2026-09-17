@@ -463,3 +463,14 @@ def tools_for(role):
                                  {**path, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
                                  ["path", "old_text", "new_text"]))
     return tools
+
+
+def single_tools():
+    """The tool set for the single-loop baseline.
+
+    Deliberately the same surface the Coder has in the four-role graph, minus
+    delegation, so an A/B between the two arms isolates the number of contexts and
+    the length of the instructions rather than the tools. Fewer tools would rig the
+    comparison in favour of the four roles.
+    """
+    return tools_for("Coder")
