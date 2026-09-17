@@ -47,12 +47,12 @@
 
 /* Projects hold threads, the way a chat list does: the project is the group, each
    run under it is one thread. */
-.project-group{display:grid;gap:2px;margin-bottom:6px}
-.project-row{gap:8px;cursor:pointer;padding:7px 8px}
+.project-group{display:grid;grid-template-columns:minmax(0,1fr);gap:2px;margin-bottom:6px}
+.project-row{gap:8px;min-width:0;cursor:pointer;padding:7px 8px}
 .project-row strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d8d8e2;font-size:.8rem;font-weight:650}
 .project-row small{color:#6f6f7d;font-size:.7rem}
 .project-row:hover{background:#18181d;color:#fff}
-.thread-list{display:grid;gap:1px;margin-left:9px;padding:2px 0 2px 14px;border-left:1px solid #24242c}
+.thread-list{display:grid;grid-template-columns:minmax(0,1fr);gap:1px;margin-left:9px;padding:2px 0 2px 14px;border-left:1px solid #24242c}
 .thread-item{display:flex;align-items:center;gap:8px;width:100%;min-width:0;border:0;background:transparent;color:#9a9aa6;text-align:left;padding:7px 8px;border-radius:8px;font-size:.78rem;cursor:pointer}
 .thread-item:hover{background:#1a1a21;color:#eee}
 .thread-row{display:flex;align-items:center;gap:2px;border-radius:8px}
@@ -146,3 +146,32 @@
   .run{grid-template-columns:auto minmax(0,1fr) auto}
   .run-status{display:none}
 }
+
+/* Projects are the sidebar's spine: the header folds them all, its + makes one, and
+   each project row makes a thread inside it. */
+.projects-head{display:flex;align-items:center;gap:6px;margin:18px 0 6px}
+.projects-toggle{flex:1;display:flex;align-items:center;gap:7px;border:0;background:transparent;color:#70707e;text-transform:uppercase;font-size:.68rem;font-weight:750;letter-spacing:.13em;padding:6px 4px;cursor:pointer;border-radius:8px}
+.projects-toggle:hover{color:#c9c9d4;background:#18181d}
+.new-project-form{display:flex;gap:6px;margin:2px 0 8px}
+.new-project-form input{flex:1;min-width:0;border:1px solid #2c2c35;background:#131318;color:#e7e7ef;border-radius:8px;padding:7px 9px;font-size:.78rem;outline:0}
+.new-project-form .run-button{min-width:0;padding:7px 10px}
+.project-row-wrap{display:flex;align-items:center;gap:2px;min-width:0}
+/* Every level of the project list has to be allowed to shrink, or a long project name
+   sizes the column to its own width and pushes the count and the + out of the rail. */
+.sidebar-bottom{grid-template-columns:minmax(0,1fr)}
+.project-row-wrap .project-row{flex:1;min-width:0}
+.thread-add{flex:none;display:grid;place-items:center;width:24px;height:24px;border:0;border-radius:7px;background:transparent;color:#6c6c78;cursor:pointer;opacity:.55}
+.project-row-wrap:hover .thread-add,.thread-add:focus-visible{opacity:1}
+.thread-add:hover{background:#22222b;color:#c9c9d4}
+
+/* The estimate sits with the bar it describes instead of up in the section title. */
+.pipeline-row{display:flex;align-items:center;gap:12px;margin:12px 0 18px}
+.pipeline-row .pipeline{flex:1;margin:0}
+.pipeline-label{color:#8b8b96;font-size:.7rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* Agent output folds away, so a long report stops pushing the page around. */
+.panel-toggle{width:100%;border:0;border-bottom:1px solid var(--line);background:transparent;color:inherit;font:inherit;cursor:pointer;text-align:left}
+.panel-toggle:hover{background:#18181d}
+.panel-toggle-side{display:flex;align-items:center;gap:8px;color:#8d8d99}
+.queued-note{margin:0 0 10px;color:#ffd166;font-size:.74rem}
+@media(max-width:700px){.pipeline-label{display:none}}

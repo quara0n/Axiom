@@ -95,6 +95,19 @@ def verdict_report(content):
     return report
 
 
+def publish_rounds(value, role, rounds):
+    """Record how many work rounds an agent has used.
+
+    The dashboard needs something that moves while an agent works; without this the
+    only progress anyone can show is which roles have finished, which changes four
+    times in a whole run.
+    """
+    for agent in value.get("agents", []):
+        if agent.get("name") == role:
+            agent["work_rounds"] = rounds
+            return
+
+
 INSTRUCTIONS = {
     "Planner": COMMON + """
 You are Planner. You also own architecture: choose the smallest suitable stack,
@@ -578,6 +591,7 @@ class Runtime:
                     name = function["name"]
                     if name in WORK_TOOLS:
                         work_rounds += 1
+                        publish_rounds(value, role, work_rounds)
                     arguments = function["arguments"]
                     if not isinstance(arguments, str) or len(arguments) > 150000:
                         raise ValueError("Tool arguments exceed limit.")

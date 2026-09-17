@@ -181,6 +181,11 @@ def create_app(settings=None, provider=None):
             value["workspace"] = str((settings.workspace_root / value["id"]).absolute())
             value["files"] = []
             request.app.state.store.save(value)
+        # The limits a run was started with, so the dashboard can show a live estimate
+        # against the budget this run actually has rather than a number of its own.
+        value["limits"] = {"tool_rounds": settings.max_tool_rounds,
+                           "model_calls": settings.max_model_calls}
+        request.app.state.store.save(value)
         runtime.start(value)
         return value
 
