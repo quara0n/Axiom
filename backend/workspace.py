@@ -34,7 +34,8 @@ def _node_check(source, suffix):
     node = shutil.which("node")
     if not node:
         raise ValueError("JavaScript validation requires Node.js on PATH.")
-    order = (".mjs", ".cjs") if suffix == ".mjs" else (".cjs", ".mjs")
+    # Explicit extensions fix the module mode; only .js is ambiguous here.
+    order = (suffix,) if suffix in {".mjs", ".cjs"} else (".cjs", ".mjs")
     message = "The JavaScript parser rejected this file."
     with tempfile.TemporaryDirectory() as folder:
         for candidate in order:

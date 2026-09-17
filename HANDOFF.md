@@ -5,6 +5,35 @@
 
 ## Current objective
 
+### Review checkpoint (2026-09-17)
+
+The current user requested a repository review and concrete bug fixes. Reviewed
+the backend runtime, workspace validation, delegation, persistence, continuation,
+provider/configuration, and dashboard runtime proxy. Three defects were fixed:
+
+- `backend/workspace.py`: explicit `.mjs`/`.cjs` syntax checks no longer retry in
+  the opposite module mode and incorrectly accept invalid files. Inline module
+  scripts also retain their module mode. Ambiguous `.js` behavior is preserved.
+- `backend/runtime.py`: enforce the work budget before each mutating tool call,
+  including calls batched in one response. Exactly reaching the budget still
+  permits the agent to return its report.
+- `backend/store.py`: explicitly close SQLite connections after transaction
+  commit/rollback rather than leaving closure to garbage collection.
+- `backend/tests/test_review_regressions.py`: seven regression cases cover these
+  failures, including batched writes and transaction rollback/connection closure.
+
+Verification: `.venv/Scripts/python.exe -m pytest backend/tests -q` -> 77 passed,
+one third-party Starlette deprecation warning. `git diff --check` passed.
+No frontend build, visual test, or real provider calls were performed.
+Live model testing was blocked because this checkout has no configured API key.
+The user explicitly authorized publishing without the live model test.
+These changes are prepared for a review-fix commit on `main`, based on `0c09794`.
+Next action: configure a local API key and run a short live smoke test, then continue the outstanding
+live delegation verification described below. Preserve tool-enforced permissions,
+bounded repair, and the distinction between static and runtime verification.
+
+### Earlier runtime objective (still relevant)
+
 Prove the new LangGraph runtime end to end: run one real multi-file task and confirm
 that it reaches the Reviewer, that the repair edge fires when a review is rejected,
 and that Coder actually delegates to a subagent.
