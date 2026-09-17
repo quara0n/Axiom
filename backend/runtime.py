@@ -68,6 +68,33 @@ def usage_numbers(message):
     }
 
 
+def verdict_report(content):
+    """The Reviewer's structured verdict, or None.
+
+    A run that solved its task must not be recorded as a failure because the model
+    wrapped its JSON in a code fence or added a sentence around it. Those are
+    formatting slips, and the loop gets one chance to ask for the object again
+    before the run is called failed.
+    """
+    if not isinstance(content, str):
+        return None
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[A-Za-z0-9_-]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        report = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(report, dict):
+        return None
+    if report.get("verdict") not in {"approved", "changes_required"}:
+        return None
+    if not isinstance(report.get("summary"), str):
+        return None
+    return report
+
+
 INSTRUCTIONS = {
     "Planner": COMMON + """
 You are Planner. You also own architecture: choose the smallest suitable stack,
@@ -453,7 +480,7 @@ class Runtime:
             {"role": "user", "content": json.dumps(context)},
         ]
         successful_tools = set()
-        nudges = {"empty": 0, "evidence": 0, "truncated": 0}
+        nudges = {"empty": 0, "evidence": 0, "truncated": 0, "verdict": 0}
         work_rounds = 0
         repeats = {}
         while work_rounds <= self.settings.max_tool_rounds:
@@ -525,12 +552,19 @@ class Runtime:
                            if role == "Coder" else ""))})
                     continue
                 if role == "Reviewer":
-                    try:
-                        report = json.loads(content)
-                        if report["verdict"] not in {"approved", "changes_required"} or not isinstance(report["summary"], str):
-                            raise ValueError("Invalid verdict")
-                    except (ValueError, KeyError, TypeError) as exc:
-                        raise ProviderError("Reviewer did not return the required structured verdict.") from exc
+                    report = verdict_report(content)
+                    if report is None:
+                        # A malformed verdict is a formatting problem, not evidence that
+                        # the work is wrong. Ask once, then fail the run if it persists.
+                        nudges["verdict"] += 1
+                        if nudges["verdict"] > 1:
+                            raise ProviderError(
+                                "Reviewer did not return the required structured verdict.")
+                        messages.append({"role": "user", "content": (
+                            'Your final response was not the required JSON object. Reply with '
+                            'exactly {"verdict": "approved" or "changes_required", "summary": '
+                            '"your full readable report"} and nothing else.' )})
+                        continue
                     value["review_verdict"] = report["verdict"]
                     return report["summary"][:24000]
                 return content[:24000]

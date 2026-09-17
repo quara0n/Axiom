@@ -27,6 +27,14 @@ def test_saving_an_older_task_preserves_recent_task_order(tmp_path):
     assert store.get(older["id"])["summary"] == "Progress update"
 
 
+def test_a_project_name_is_a_label_not_a_path(tmp_path):
+    store = Store(tmp_path / "projects.sqlite3")
+    assert store.create("Run", "test/model", project="  Varg  ")["project"] == "Varg"
+    assert store.create("Run", "test/model")["project"] == "Axiom"
+    assert store.create("Run", "test/model", project="   ")["project"] == "Axiom"
+    assert store.create("Run", "test/model", project="x" * 400)["project"] == "x" * 60
+
+
 class MockProvider:
     def __init__(self, fail=False, delay=0):
         self.calls = []
@@ -336,6 +344,85 @@ def test_reviewer_can_reject_implementation(tmp_path):
         assert value["status"] == "failed"
         assert value["review_verdict"] == "changes_required"
         assert value["summary"] == "Missing requirement."
+
+
+def test_a_fenced_reviewer_verdict_is_still_a_verdict(tmp_path):
+    """A run that solved its task must not be failed because the model wrapped its
+    JSON in a markdown fence."""
+    class FencedProvider(MockProvider):
+        async def complete(self, model, messages, tools):
+            result = await super().complete(model, messages, tools)
+            if len(messages) > 2 and "You are Reviewer." in messages[0]["content"]:
+                return {"content": "```json\n"
+                        + json.dumps({"verdict": "approved", "summary": "Fine."})
+                        + "\n```"}
+            return result
+
+    with TestClient(create_app(settings(tmp_path), FencedProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "completed", value.get("error")
+        assert value["review_verdict"] == "approved"
+        assert value["summary"] == "Fine."
+
+
+def test_a_thread_is_filed_under_the_project_it_was_started_in(tmp_path):
+    with TestClient(create_app(settings(tmp_path), MockProvider())) as client:
+        filed = client.post("/api/tasks", json={"task": "Run", "project": "Varg"}).json()
+        assert filed["project"] == "Varg"
+        assert wait_task(client, filed["id"])["status"] == "completed"
+        default = client.post("/api/tasks", json={"task": "Run"}).json()
+        assert default["project"] == "Axiom"
+        assert wait_task(client, default["id"])["status"] == "completed"
+
+
+def test_a_malformed_verdict_is_asked_for_once_then_fails(tmp_path):
+    class ProseProvider(MockProvider):
+        def __init__(self):
+            super().__init__()
+            self.verdict_calls = 0
+
+        async def complete(self, model, messages, tools):
+            # Past the first inspection the Reviewer is asked again, so this provider
+            # answers directly instead of leaning on the mock's shape assertions.
+            if len(messages) > 2 and "You are Reviewer." in messages[0]["content"]:
+                self.verdict_calls += 1
+                return {"content": "Overall the implementation looks fine to me."}
+            return await super().complete(model, messages, tools)
+
+    provider = ProseProvider()
+    with TestClient(create_app(settings(tmp_path), provider)) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "failed"
+        assert "structured verdict" in value["error"]
+        # One answer, one retry. A model that cannot produce the object at all is
+        # still a failed run, just not one that failed on the first slip.
+        assert provider.verdict_calls == 2
+
+
+def test_a_verdict_slip_does_not_fail_a_run_that_solved_its_task(tmp_path):
+    class SlipProvider(MockProvider):
+        def __init__(self):
+            super().__init__()
+            self.verdict_calls = 0
+
+        async def complete(self, model, messages, tools):
+            if len(messages) > 2 and "You are Reviewer." in messages[0]["content"]:
+                self.verdict_calls += 1
+                if self.verdict_calls == 1:
+                    return {"content": "Verdict: approved. Summary: everything is fine."}
+                return {"content": json.dumps({"verdict": "approved",
+                                               "summary": "Approved after a retry."})}
+            return await super().complete(model, messages, tools)
+
+    provider = SlipProvider()
+    with TestClient(create_app(settings(tmp_path), provider)) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        value = wait_task(client, task_id)
+        assert value["status"] == "completed", value.get("error")
+        assert value["review_verdict"] == "approved"
+        assert provider.verdict_calls == 2
 
 
 def test_no_tool_evidence_cannot_report_success(tmp_path):

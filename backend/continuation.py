@@ -10,13 +10,17 @@ from .store import now
 from .workspace import Workspace, copy_workspace_files
 
 
-def prepare_continuation(settings, store, task, model, per_agent, instructions, source, auto=None):
+def prepare_continuation(settings, store, task, model, per_agent, instructions, source,
+                        auto=None, project=None):
     """Create and publish a continuation task, or raise ValueError before publishing.
 
     Nothing is written to the store until the workspace copy has succeeded, so a
     rejected continuation cannot leave a queued task with no run behind it.
     """
-    value = store.create(task, model, per_agent, persist=False)
+    # A continuation stays in the project its parent was filed under unless the
+    # caller files it somewhere else on purpose.
+    value = store.create(task, model, per_agent, persist=False,
+                         project=project or source.get("project"))
     value["project_instructions"] = instructions
     value["workspace"] = str((settings.workspace_root / value["id"]).absolute())
     value["files"] = []

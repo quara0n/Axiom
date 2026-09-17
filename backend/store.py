@@ -6,6 +6,16 @@ from uuid import uuid4
 
 ROLES = ("Planner", "Coder", "Tester", "Reviewer")
 TERMINAL = {"completed", "failed", "cancelled"}
+# Threads are filed under a project. It is a label the operator reads in the
+# sidebar, never a path, a key or an identifier anything else depends on.
+DEFAULT_PROJECT = "Axiom"
+
+
+def project_name(value):
+    if not isinstance(value, str):
+        return DEFAULT_PROJECT
+    name = " ".join(value.split())[:60].strip()
+    return name or DEFAULT_PROJECT
 
 
 def now():
@@ -24,10 +34,11 @@ class Store:
     def connect(self):
         return sqlite3.connect(self.path, timeout=10)
 
-    def create(self, task: str, model: str, models=None, *, persist=True):
+    def create(self, task: str, model: str, models=None, *, persist=True, project=None):
         chosen = {role: models[role] for role in ROLES if models and models.get(role)}
         value = {
-            "id": uuid4().hex, "task": task, "model": model, "models": chosen, "status": "queued",
+            "id": uuid4().hex, "task": task, "model": model, "models": chosen,
+            "project": project_name(project), "status": "queued",
             "created_at": now(), "updated_at": now(), "summary": "", "error": None,
             "agents": [{"name": role, "status": "pending", "assignment": task, "result": "",
                         "model": chosen.get(role, model)}

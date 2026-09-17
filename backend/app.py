@@ -26,6 +26,7 @@ class TaskRequest(BaseModel):
     model: str | None = Field(default=None, max_length=200)
     models: dict[str, str] | None = None
     project_instructions: str = Field(default="", max_length=16000)
+    project: str | None = Field(default=None, max_length=60)
     continue_from: str | None = Field(default=None, max_length=64)
 
 
@@ -160,16 +161,18 @@ def create_app(settings=None, provider=None):
                 model = source.get("model") or model
                 per_agent = dict(source.get("models") or {})
         instructions = body.project_instructions.strip() or (source or {}).get("project_instructions", "")
+        project = body.project or (source.get("project") if source else None)
         if source:
             try:
                 value = prepare_continuation(settings, request.app.state.store, task, model,
-                                             per_agent, instructions, source)
+                                             per_agent, instructions, source, project=project)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
         else:
             # Publish only after preparation succeeds; rejected requests must not leave
             # queued tasks with no corresponding runtime job.
-            value = request.app.state.store.create(task, model, per_agent, persist=False)
+            value = request.app.state.store.create(task, model, per_agent, persist=False,
+                                                   project=project)
             value["project_instructions"] = instructions
             value["workspace"] = str((settings.workspace_root / value["id"]).absolute())
             value["files"] = []

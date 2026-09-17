@@ -64,3 +64,6 @@ workspaces/
 /bench/tasks/.validation/
 /.bench-debug/
 /.uv-cache/
+
+# Local server logs written when the dashboard and backend are started by hand.
+/.run/
