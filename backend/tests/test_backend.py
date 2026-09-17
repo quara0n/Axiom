@@ -366,6 +366,37 @@ def test_a_fenced_reviewer_verdict_is_still_a_verdict(tmp_path):
         assert value["summary"] == "Fine."
 
 
+def test_a_finished_thread_is_deleted_with_the_workspace_it_wrote(tmp_path):
+    config = settings(tmp_path)
+    with TestClient(create_app(config, MockProvider())) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        assert wait_task(client, task_id)["status"] == "completed"
+        workspace = config.workspace_root / task_id
+        assert workspace.is_dir()
+
+        response = client.delete(f"/api/tasks/{task_id}")
+        assert response.status_code == 200
+        assert response.json() == {"deleted": task_id}
+        assert client.get(f"/api/tasks/{task_id}").status_code == 404
+        assert not workspace.exists()
+
+
+def test_a_running_thread_is_not_deleted(tmp_path):
+    """Deleting the record while a job is still writing would leave it with no owner."""
+    config = settings(tmp_path)
+    with TestClient(create_app(config, MockProvider(delay=1.5))) as client:
+        task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        response = client.delete(f"/api/tasks/{task_id}")
+        assert response.status_code == 409
+        assert "Cancel" in response.json()["detail"]
+        assert client.get(f"/api/tasks/{task_id}").status_code == 200
+
+
+def test_deleting_a_thread_that_is_not_there_is_a_404(tmp_path):
+    with TestClient(create_app(settings(tmp_path), MockProvider())) as client:
+        assert client.delete("/api/tasks/0123456789abcdef0123456789abcdef").status_code == 404
+
+
 def test_a_thread_is_filed_under_the_project_it_was_started_in(tmp_path):
     with TestClient(create_app(settings(tmp_path), MockProvider())) as client:
         filed = client.post("/api/tasks", json={"task": "Run", "project": "Varg"}).json()

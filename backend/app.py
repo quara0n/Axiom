@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import ipaddress
 import re
+import shutil
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -208,6 +209,23 @@ def create_app(settings=None, provider=None):
             request.app.state.runtime.cancel(task_id)
             # Cancellation is asynchronous; status polling returns its durable result.
         return request.app.state.store.get(task_id)
+
+    @app.delete("/api/tasks/{task_id}")
+    async def delete_task(task_id: str, request: Request):
+        """Delete a finished thread, and the workspace it wrote.
+
+        A running task is refused: deleting the record while a job is still writing
+        into its workspace would leave a live process with no owner.
+        """
+        value = request.app.state.store.get(task_id)
+        if not value:
+            raise HTTPException(404, "That thread was not found.")
+        if value["status"] not in TERMINAL:
+            raise HTTPException(409, "Cancel the task before deleting it.")
+        request.app.state.store.delete(task_id)
+        if re.fullmatch(r"[0-9a-f]{32}", task_id):
+            shutil.rmtree(settings.workspace_root / task_id, ignore_errors=True)
+        return {"deleted": task_id}
 
     return app
 

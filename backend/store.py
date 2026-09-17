@@ -65,6 +65,11 @@ class Store:
             rows = db.execute("SELECT data FROM tasks ORDER BY rowid DESC LIMIT 100").fetchall()
         return [json.loads(row[0]) for row in rows]
 
+    def delete(self, task_id):
+        with self.connect() as db:
+            cursor = db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        return cursor.rowcount > 0
+
     def recover(self):
         """A restart no longer throws a run away: the workspace is still there.
 
