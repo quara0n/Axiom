@@ -175,3 +175,18 @@
 .panel-toggle-side{display:flex;align-items:center;gap:8px;color:#8d8d99}
 .queued-note{margin:0 0 10px;color:#ffd166;font-size:.74rem}
 @media(max-width:700px){.pipeline-label{display:none}}
+
+/* The usage figures belong under the title they describe, not inside the connection
+   pill: the pill grew wide enough to run into the heading. */
+.heading-note{margin:6px 0 0;color:#8b8b96;font-size:.72rem}
+
+/* Which project the next thread lands in, and how to send. */
+.task-context{margin-left:8px;color:#8b79ff;font-weight:600}
+.send-hint{color:#66666f;font-size:.7rem}
+@media(max-width:700px){.send-hint{display:none}}
+
+/* Deleting a project deletes its threads, so the control sits with the thread count
+   rather than next to the row that opens it. */
+.project-delete{flex:none;display:grid;place-items:center;width:24px;height:24px;border:0;border-radius:7px;background:transparent;color:#6c6c78;cursor:pointer;opacity:.55}
+.project-row-wrap:hover .project-delete,.project-delete:focus-visible{opacity:1}
+.project-delete:hover{background:#3a2226;color:#f6aaaa}
