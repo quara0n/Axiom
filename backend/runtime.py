@@ -11,6 +11,7 @@ from .provider import ProviderError
 from .coordination import DEFAULT_PROJECT_INSTRUCTIONS, compact_messages, handoff_text
 from .continuation import prepare_continuation
 from .delegation import DELEGATION_NAMES, Delegation, delegation_tools
+from .mcp import split_tool_name
 from . import runner
 from .store import ROLES, TERMINAL, now
 from .workspace import CHECKABLE_SUFFIXES, READ_ONLY_TOOLS, Workspace, tools_for
@@ -168,8 +169,10 @@ whatever you could not complete."""
 
 
 class Runtime:
-    def __init__(self, settings, store, provider):
+    def __init__(self, settings, store, provider, mcp=None):
         self.settings, self.store, self.provider = settings, store, provider
+        # An MCP server is optional: without one the Coder simply has its own tools.
+        self.mcp = mcp
         self.jobs = {}
         self.semaphore = asyncio.Semaphore(2)
         # Bound how many isolated subagents run at once across every task.
@@ -469,6 +472,13 @@ class Runtime:
         # Only the Lead Coder can delegate, and a subagent cannot delegate again.
         delegation = Delegation(self, value, workspace) if role == "Coder" and worker is None else None
         tools = tools_for(role) + (delegation_tools() if delegation else [])
+        # Only the Coder reaches an outside tool server, and only the lead Coder:
+        # a subagent writing into an isolated copy has no business driving Blender.
+        mcp_tools = []
+        if role == "Coder" and worker is None and self.mcp is not None:
+            if self.mcp.available():
+                mcp_tools = self.mcp.tools()
+        tools = tools + mcp_tools
         # During repairs, old downstream reports are feedback, not fresh evidence.
         visible_previous = previous if role == "Coder" else {
             name: previous[name] for name in ROLES[:ROLES.index(role)] if name in previous
@@ -589,7 +599,11 @@ class Runtime:
                 try:
                     function = call["function"]
                     name = function["name"]
-                    if name in WORK_TOOLS:
+                    # An outside tool server makes things too, so its calls are bounded
+                    # by the same work-round budget as a write.
+                    mcp_server, mcp_tool = split_tool_name(name)
+                    is_mcp = bool(mcp_server and self.mcp is not None and self.mcp.available())
+                    if name in WORK_TOOLS or is_mcp:
                         if work_rounds >= self.settings.max_tool_rounds:
                             raise ProviderError(
                                 f"{role} exceeded its work round limit ({self.settings.max_tool_rounds}). "
@@ -620,6 +634,14 @@ class Runtime:
                         result = await delegation.call(name, args, previous)
                     elif name == "validate_file":
                         result = await asyncio.to_thread(workspace.call, name, args, role)
+                    elif is_mcp:
+                        outcome = await asyncio.to_thread(self.mcp.call, name, args)
+                        value["mcp_calls"] = (value.get("mcp_calls") or [])[-49:] + [
+                            {"tool": name, "role": role, "ok": not outcome["is_error"]}]
+                        result = {"tool": name, "output": outcome["text"],
+                                  "truncated": outcome["truncated"]}
+                        if outcome["is_error"]:
+                            result["error"] = "The tool server reported a failure."
                     else:
                         result = workspace.call(name, args, role)
                     if name in READ_ONLY_TOOLS:
@@ -642,7 +664,9 @@ class Runtime:
                     successful_tools.add(name)
                     # A subagent writes in its own copy; the task's file list must keep
                     # describing the integrated workspace.
-                    if name in {"write_file", "edit_file"} and worker is None:
+                    # A Blender export lands in the workspace like any other artifact,
+                    # so the file list has to be refreshed after an outside call too.
+                    if (name in {"write_file", "edit_file"} or is_mcp) and worker is None:
                         value["files"] = workspace.files()
                     self.event(value, label, f"Tool {name}: {args.get('path', 'workspace')}")
                 except (ValueError, KeyError, TypeError, OSError, SyntaxError) as exc:

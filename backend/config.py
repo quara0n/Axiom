@@ -28,6 +28,11 @@ class Settings:
     # Serving the page a run wrote is the same kind of decision as running it.
     allow_preview: bool = False
     preview_port: int = 8100
+    # An MCP server is another process that offers tools (Blender, for one). Starting
+    # one runs someone else's code with this backend's privileges, so it is opt-in.
+    allow_mcp: bool = False
+    mcp_servers: str = ""
+    mcp_timeout: float = 120
     # A transient provider failure should not end a task, and recovery that spends
     # money on its own stays off until the operator asks for it.
     max_provider_attempts: int = 3
@@ -74,6 +79,10 @@ class Settings:
             allow_preview=os.getenv("AXIOM_ALLOW_PREVIEW", "").strip().lower()
             in {"1", "true", "yes", "on"},
             preview_port=max(1024, min(int(os.getenv("AXIOM_PREVIEW_PORT", "8100")), 65535)),
+            allow_mcp=os.getenv("AXIOM_ALLOW_MCP", "").strip().lower()
+            in {"1", "true", "yes", "on"},
+            mcp_servers=os.getenv("AXIOM_MCP_SERVERS", "").strip(),
+            mcp_timeout=max(5, min(float(os.getenv("AXIOM_MCP_TIMEOUT", "120")), 1800)),
             max_provider_attempts=max(1, min(int(os.getenv("AXIOM_MAX_PROVIDER_ATTEMPTS", "3")), 8)),
             provider_retry_base=max(0.0, min(float(os.getenv("AXIOM_PROVIDER_RETRY_BASE", "1")), 30)),
             auto_resume=os.getenv("AXIOM_AUTO_RESUME", "").strip().lower() in {"1", "true", "yes", "on"},

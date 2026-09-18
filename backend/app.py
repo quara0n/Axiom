@@ -13,6 +13,7 @@ from dotenv import set_key
 
 from .config import Settings
 from .continuation import prepare_continuation
+from .mcp import McpError, McpHub, parse_servers
 from .preview import Preview
 from .provider import OpenRouter, ProviderError
 from . import runner
@@ -54,7 +55,14 @@ def create_app(settings=None, provider=None):
             retry_base=settings.provider_retry_base,
         )
         app.state.api_key = settings.api_key
-        app.state.runtime = Runtime(settings, app.state.store, app.state.provider)
+        try:
+            servers = parse_servers(settings.mcp_servers) if settings.allow_mcp else []
+        except McpError:
+            servers = []
+        app.state.mcp = McpHub(servers, enabled=settings.allow_mcp,
+                               timeout=settings.mcp_timeout)
+        app.state.runtime = Runtime(settings, app.state.store, app.state.provider,
+                                    mcp=app.state.mcp)
         app.state.preview = Preview(settings.preview_port)
         # Recovery spends the operator's money, so it happens only when asked for.
         if settings.auto_resume:
@@ -75,6 +83,7 @@ def create_app(settings=None, provider=None):
         await app.state.runtime.close()
         await app.state.provider.close()
         app.state.preview.stop()
+        app.state.mcp.close()
 
     app = FastAPI(title="Axiom local agent runtime", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins),
@@ -286,6 +295,29 @@ def create_app(settings=None, provider=None):
             verification["mode"] = "static_and_executed"
         request.app.state.store.save(value)
         return outcome
+
+    @app.get("/api/mcp")
+    async def mcp_status(request: Request):
+        """What the operator asked for, without starting anything."""
+        hub = request.app.state.mcp
+        return {"enabled": hub.enabled,
+                "servers": [{"name": server.name, "command": server.command}
+                            for server in hub.servers]}
+
+    @app.post("/api/mcp/probe")
+    async def mcp_probe(request: Request):
+        """Start the configured servers and list what they offer.
+
+        A POST because it spawns processes: a GET that starts a Blender bridge as a
+        side effect would be a trap for anything that walks the API.
+        """
+        hub = request.app.state.mcp
+        if not hub.available():
+            return {"enabled": hub.enabled, "tools": [],
+                    "reason": "MCP is off or no server is configured. Set AXIOM_ALLOW_MCP=1 "
+                              "and AXIOM_MCP_SERVERS, then restart the backend."}
+        tools = await asyncio.to_thread(hub.tools)
+        return {"enabled": True, "tools": [tool["function"]["name"] for tool in tools]}
 
     return app
 

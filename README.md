@@ -120,6 +120,28 @@ is never folded into the solve rate.
 
 ### Remaining capabilities
 
+### Tool servers (MCP)
+
+The Coder can reach a Model Context Protocol server, which is how Blender or another
+outside tool becomes available to an agent. `backend/mcp.py` speaks stdio JSON-RPC:
+it starts the configured command once, asks for its tool list, and routes calls to it
+with a timeout and a truncated reply. Tools arrive prefixed with the server name, so
+`blender__make_cube` cannot collide with `read_file`.
+
+Two things are deliberate. A server is spawned only when the operator has turned MCP
+on and an agent actually reaches for one of its tools, because a server is someone
+else's code running with this backend's privileges. And only the lead Coder sees those
+tools: a subagent working in an isolated copy has no business driving Blender.
+
+```sh
+# .env
+AXIOM_ALLOW_MCP=1
+AXIOM_MCP_SERVERS=[{"name":"blender","command":"uvx","args":["blender-mcp"]}]
+```
+
+`GET /api/mcp` reports what is configured without starting anything, and
+`POST /api/mcp/probe` starts the servers and lists the tools they offer.
+
 For ambitious 3D games, the next major capability is an isolated execution worker
 that can install dependencies and build the project, plus a browser worker that
 can inspect screenshots, exercise controls and capture console errors. Those
