@@ -590,6 +590,10 @@ class Runtime:
                     function = call["function"]
                     name = function["name"]
                     if name in WORK_TOOLS:
+                        if work_rounds >= self.settings.max_tool_rounds:
+                            raise ProviderError(
+                                f"{role} exceeded its work round limit ({self.settings.max_tool_rounds}). "
+                                "Raise AXIOM_MAX_TOOL_ROUNDS or split the task.")
                         work_rounds += 1
                         publish_rounds(value, role, work_rounds)
                     arguments = function["arguments"]
