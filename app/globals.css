@@ -190,3 +190,10 @@
 .project-delete{flex:none;display:grid;place-items:center;width:24px;height:24px;border:0;border-radius:7px;background:transparent;color:#6c6c78;cursor:pointer;opacity:.55}
 .project-row-wrap:hover .project-delete,.project-delete:focus-visible{opacity:1}
 .project-delete:hover{background:#3a2226;color:#f6aaaa}
+
+/* Destructive confirmation lives in the page: window.confirm does not exist in the
+   in-app browser, so a browser-dialog confirmation silently did nothing. */
+.confirm-modal{max-width:440px}
+.confirm-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+.run-button.danger{background:#b3453f;box-shadow:0 8px 24px rgba(179,69,63,.25)}
+.run-button.danger:hover{background:#c8544d}

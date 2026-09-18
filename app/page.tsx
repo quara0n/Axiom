@@ -74,6 +74,7 @@ export default function Home(){
  const [outputOpen,setOutputOpen]=useState(true);
  const [extraProjects,setExtraProjects]=useState<string[]>([]);
  const [newProject,setNewProject]=useState<string|null>(null);
+ const [confirmDelete,setConfirmDelete]=useState<{kind:"thread"|"project";target:string;label:string;detail:string}|null>(null);
  const [openProjects,setOpenProjects]=useState<Record<string,boolean>>({});
  const [activeTitle,setActiveTitle]=useState("");
  const [repairRound,setRepairRound]=useState(0);
@@ -193,36 +194,47 @@ async function selectTask(id:string){activeId.current=id;try{const data=await ap
  };
  // Deleting a thread also deletes the workspace it wrote, so it asks first and names
  // what goes. The backend refuses while the task is still running.
- async function deleteTask(id:string){
+ // Nothing here asks the browser for a confirmation dialog: window.confirm does not
+ // exist in the in-app browser, so it threw and every delete looked like a dead button.
+ // The question is part of the page instead.
+ function deleteTask(id:string){
   const item=history.find(task=>task.id===id);
-  if(!window.confirm(`Delete "${item?taskTitle(item):id.slice(0,8)}" and the workspace it wrote? This cannot be undone.`))return;
-  setError("");
-  try{
-   await api("tasks/"+id,{method:"DELETE"});
-   const data=await api<{tasks:Task[]}>("tasks");
-   setHistory(data.tasks);
-   if(id===taskId)startNewTask();
-  }catch(e){setError(e instanceof Error?e.message:"Could not delete the thread");}
+  setConfirmDelete({kind:"thread",target:id,
+   label:`the thread “${item?taskTitle(item):id.slice(0,8)}”`,
+   detail:"Its workspace is removed too."});
  }
  // Deleting a project means deleting its threads: the name lives in localStorage, the
  // threads live in the store, and both have to go or the project comes back empty.
- async function deleteProject(name:string){
+ function deleteProject(name:string){
   const threads=history.filter(task=>(task.project||"Axiom")===name);
-  const question=threads.length
-   ? `Delete the project "${name}" and its ${threads.length} thread${threads.length===1?"":"s"}? Their workspaces are removed too.`
-   : `Delete the empty project "${name}"?`;
-  if(!window.confirm(question))return;
+  setConfirmDelete({kind:"project",target:name,label:`the project “${name}”`,
+   detail:threads.length
+    ? `Its ${threads.length} thread${threads.length===1?"":"s"} and their workspaces are removed too.`
+    : "It has no threads."});
+ }
+ async function performDelete(){
+  const job=confirmDelete;
+  if(!job)return;
+  setConfirmDelete(null);
   setError("");
+  if(job.kind==="thread"){
+   try{await api("tasks/"+job.target,{method:"DELETE"});}
+   catch(e){setError(e instanceof Error?e.message:"Could not delete the thread");return;}
+   try{const data=await api<{tasks:Task[]}>("tasks");setHistory(data.tasks);}catch{}
+   if(job.target===taskId)startNewTask();
+   return;
+  }
+  const threads=history.filter(task=>(task.project||"Axiom")===job.target);
   let failed=0;
   for(const thread of threads){
    try{await api("tasks/"+thread.id,{method:"DELETE"});}
    catch{failed+=1;}
   }
-  const next=extraProjects.filter(item=>item!==name);
+  const next=extraProjects.filter(item=>item!==job.target);
   setExtraProjects(next);
   try{localStorage.setItem("axiom-projects",JSON.stringify(next));}catch{}
   try{const data=await api<{tasks:Task[]}>("tasks");setHistory(data.tasks);}catch{}
-  if(project.trim()===name)setProject("Axiom");
+  if(project.trim()===job.target)setProject("Axiom");
   if(threads.some(thread=>thread.id===taskId))startNewTask();
   if(failed)setError(`${failed} thread${failed===1?"":"s"} could not be deleted; try again.`);
  }
@@ -319,5 +331,6 @@ async function selectTask(id:string){activeId.current=id;try{const data=await ap
       {view==="activity"?<>{calendarPage}{activityPanel}</>:taskId?<>{teamBoard}{resultsPanel}{testResult&&testPanel}</>:<section className="panel"><div className="empty-state"><Bot size={24}/><p>No thread open. Pick one on the left, or write a prompt above to start a new one.</p></div></section>}
     </section>
     {settingsOpen&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setSettingsOpen(false)}}><section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title"><button className="modal-close" aria-label="Close" onClick={()=>setSettingsOpen(false)}><X size={18}/></button><p className="eyebrow">Backend connection</p><h2 id="settings-title">OpenRouter</h2><p className="modal-copy">Enter your API key to connect the local backend. It is saved in the backend&apos;s own credentials file (.axiom/credentials.env), never in this browser and never in a file Next.js watches while developing.</p><label>OpenRouter API key<input type="password" value={apiKey} onChange={e=>setApiKey(e.target.value)} placeholder={connected?"Key configured — enter a new key to replace it":"Paste your API key"} autoComplete="off"/></label><p className="modal-copy">{connected?"Backend key configured":"Backend key not configured"}</p><label>Available models<select value={models.some(option=>option.id===model)?model:""} onChange={e=>setModel(e.target.value)} disabled={!connected}><option value="">{connected?"Custom or backend default":"Connect a key to load models"}</option>{models.map(option=><option value={option.id} key={option.id}>{option.name}</option>)}</select></label><label>OpenRouter model ID<input value={model} onChange={e=>setModel(e.target.value)} placeholder="Use backend default" autoComplete="off"/></label><p className="modal-copy">Use models that support tool calling. The default runs every agent unless you override it below.</p><div className="agent-models"><p className="eyebrow">Model per agent</p>{agents.map(({name})=><label key={name}>{name}<select value={agentModels[name]||""} onChange={e=>setAgentModels(current=>({...current,[name]:e.target.value}))} disabled={!connected}><option value="">Use default model</option>{models.map(option=><option value={option.id} key={option.id}>{option.name}</option>)}</select></label>)}</div>{settingsError&&<p className="error-message" role="alert">{settingsError}</p>}<button className="connect-button" onClick={()=>void saveConnection()} disabled={savingSettings}>{savingSettings?"Saving connection…":"Save connection"}</button></section></div>}
+    {confirmDelete&&<div className="modal-backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)setConfirmDelete(null)}}><section className="settings-modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title"><p className="eyebrow">Delete</p><h2 id="confirm-title">Delete {confirmDelete.label}?</h2><p className="modal-copy">{confirmDelete.detail} This cannot be undone.</p><div className="confirm-actions"><button className="cancel-button" onClick={()=>setConfirmDelete(null)}>Keep it</button><button className="run-button danger" onClick={()=>void performDelete()}>Delete</button></div></section></div>}
   </main>;
 }
