@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 
 from backend.bench import (DEFAULT_SUITE, find_tasks, load_task, parse_score,
-                           render_report, run_cell, run_suite, summarize, validate_task,
-                           wilson_interval)
+                           render_report, resource_record, run_cell, run_suite, summarize,
+                           validate_task, wilson_interval)
 from backend.config import Settings
 
 
@@ -177,3 +177,36 @@ def test_the_report_separates_the_harness_verdict_from_the_checker(tmp_path):
     assert "cross-benchmark" in report
     assert "Visual and design quality" in report
     assert summarize(run["records"])["null"]["solved"] == 0
+
+def test_jev_spend_belongs_to_the_cell_total():
+    """A benchmark that reads only the model cost reports a run as cheaper than it was."""
+    value = {"usage": {"totals": {"cost": 0.10, "prompt_tokens": 100, "unknown_calls": 0},
+                       "by_role": {}},
+             "jev": {"totals": {"calls": 2, "requests": 2, "reused": 0, "input_tokens": 500,
+                                "unknown_cost_calls": 0,
+                                "cost": {"value": 0.0005, "kind": "estimated"}}}}
+    record = resource_record(value)
+    assert record["cost_usd"] == 0.10
+    assert record["jev"]["cost_usd"] == 0.0005
+    assert record["jev"]["calls"] == 2
+    assert record["total_cost_usd"] == pytest.approx(0.1005)
+    # A JEV call whose price is unknown makes the total unknown, never cheaper.
+    value["jev"]["totals"]["unknown_cost_calls"] = 1
+    assert resource_record(value)["total_cost_usd"] is None
+
+
+def test_the_summary_and_report_show_jev():
+    records = [{"arm": "roles", "task": "sample", "solved": True, "wall_ms": 1000,
+                "cost_usd": 0.10, "unknown_usage_calls": 0, "total_cost_usd": 0.1005,
+                "tokens": {"prompt_tokens": 100}, "model_calls": 3,
+                "jev": {"calls": 2, "requests": 2, "reused": 0, "input_tokens": 500,
+                        "unknown_cost_calls": 0, "cost_usd": 0.0005}}]
+    summary = summarize(records)
+    assert summary["roles"]["jev_calls"] == 2
+    assert summary["roles"]["jev_cost_usd"] == pytest.approx(0.0005)
+    assert summary["roles"]["cost_per_solve_usd"] == pytest.approx(0.1005)
+    report = render_report({"started_at": "2026-09-20T00:00:00Z", "provider": "golden",
+                            "arms": ["roles"], "tasks": [], "repeats": 1,
+                            "max_cost_usd": None, "harness": "test", "records": records,
+                            "validation": [], "summary": summary})
+    assert "JEV calls" in report and "JEV cost" in report

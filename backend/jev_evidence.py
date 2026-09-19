@@ -52,6 +52,9 @@ MAX_REQUIREMENTS = 8
 # small and cheap, and we pay per input token.
 DEFAULT_STATE_BUDGET = 20_000
 TRUNCATION_MARKER = "\n[... truncated for this request ...]"
+# Closing a client is cleanup, not work: it gets its own small bound so a slow close
+# cannot push a pass past the budget it was given.
+CLOSE_TIMEOUT = 2.0
 EVIDENCE_LIMITS_NOTE = (
     "Some project files are missing from or cut short in this request. If a question "
     "depends on text you cannot see, answer as uncertain rather than as refuting it.")
@@ -71,7 +74,19 @@ _RUNTIME = re.compile(
     r"styring|visible|synlig|occlud|dekker|cover|render|frame|fps|smooth|flyt|"
     r"responsive|lag|performance|ytelse|playable|spillbar|plays|feel|fun|morsom|"
     r"sound|audio|lyd|hear|h[øo]r|animat|stuck|fast|fart|speed|poeng|score|"
-    r"kollisjon|kj[øo]rbar|tr[åa]kk)", re.IGNORECASE)
+    r"kollisjon|kj[øo]rbar|tr[åa]kk|restart|retry|respawn|reset|start over|"
+    r"pr[øo]v igjen|begynne p[åa] nytt)", re.IGNORECASE)
+# Source can only settle the shapes we can name. Everything else is `unknown`, and an
+# unknown requirement is never a confirmation and never a defect: a formulation nobody
+# thought about must not inherit the confidence of one we did think about. Each entry
+# here is a check a reader can actually perform - a file count, a forbidden reference,
+# a string that must be present - not a judgement about behaviour.
+_SOURCE = re.compile(
+    r"(single file|one file|one html file|no network|no cdn|no external|no dependenc|"
+    r"offline|file://|no webgl|no three\.js|no build step|no imports?|"
+    r"contains? the (word|string|text|line)|exactly the line|exact strings?|"
+    r"under \d+ lines|fewer than \d+ lines|norwegian|package\.json|manifest)",
+    re.IGNORECASE)
 # Entry points first, so a one-file game is never crowded out by its own helpers.
 _ENTRY_POINTS = ("index.html", "main.py", "app.py", "main.js", "game.js", "src/main.js")
 
@@ -105,12 +120,21 @@ def requirement_lines(task, limit=MAX_REQUIREMENTS):
 
 
 def classify(requirement):
-    """Whether reading source could ever settle this requirement.
+    """What reading source could settle, if anything.
 
-    "runtime" means the requirement is about what the artifact does when it runs, so
-    source cannot confirm or refute it. The marker list is over-inclusive on purpose.
+    Three answers, deliberately. `runtime` is behaviour that only running or looking can
+    show. `source` is one of the narrow shapes a reader can actually decide - a file
+    count, a forbidden reference, a string that must be present. `unknown` is everything
+    else, and it matters most: an unrecognised requirement must not fall back to the
+    confidence of a recognised one, which is how "the game must restart when R is used"
+    could have been confirmed without ever running it.
     """
-    return "runtime" if _RUNTIME.search(str(requirement)) else "source"
+    text = str(requirement)
+    if _RUNTIME.search(text):
+        return "runtime"
+    if _SOURCE.search(text):
+        return "source"
+    return "unknown"
 
 
 def select_state(root, files, budget=DEFAULT_STATE_BUDGET):
@@ -162,8 +186,9 @@ def verdict(score, kind, coverage_complete):
     """What we are willing to claim, given the answer and the evidence behind it."""
     if score is None:
         return "invalid"
-    if kind == "runtime":
-        # Source cannot establish behaviour, in either direction.
+    if kind != "source":
+        # Behaviour needs execution, and an unrecognised requirement needs a person. In
+        # neither case can reading source confirm or refute it, however high the answer.
         return "insufficient_evidence"
     if score >= SUPPORTED_AT_OR_ABOVE:
         return "supported"
@@ -238,28 +263,33 @@ def ledger_add(value, entry):
     return ledger
 
 
-def _outcome(value, status, reason, started, *, model=None, usage=None, price=0.042):
-    """Record a pass that sent nothing, so a skip is visible rather than silent."""
+def _outcome(value, status, reason, started, *, model=None, attempted=False):
+    """Record a pass that produced no assessment, and whether a request was attempted.
+
+    "We sent nothing" and "we sent something and never learned what it cost" are
+    different facts about money. A failed request is unknown, never zero.
+    """
+    cost = ({"value": None, "kind": "unknown",
+             "basis": "a request was attempted and its consumption was not reported"}
+            if attempted else
+            {"value": 0.0, "kind": "estimated", "basis": "no request was sent"})
     entry = {"purpose": "evidence", "status": status, "reused": False, "model": model,
              "latency_ms": round((time.perf_counter() - started) * 1000),
-             "input_tokens": (usage or {}).get("input_tokens"),
-             "output_tokens": (usage or {}).get("output_tokens"),
-             "cost": {"value": 0.0, "kind": "estimated",
-                      "basis": "no request was sent"},
-             "at": now()}
+             "input_tokens": None, "output_tokens": None, "cost": cost, "at": now()}
     ledger_add(value, entry)
     return {"status": status, "findings": [], "reason": reason, "model": model,
             "assessment_at": now(), "latency_ms": entry["latency_ms"]}
 
 
-async def collect(settings, value, files, *, client=None, remaining_seconds=None,
-                  budget=DEFAULT_STATE_BUDGET):
+async def collect(settings, value, files, *, client=None, previous=None,
+                  remaining_seconds=None, budget=DEFAULT_STATE_BUDGET):
     """Assess the stated requirements against the finished workspace. Never raises.
 
-    `value` is the task record: a previous assessment is read from it for reuse, and
-    every call is appended to its JEV ledger so cost and time stay visible through
-    repair rounds. Cancellation of the whole task is the one thing that escapes: a
-    decision layer must not swallow the operator's stop.
+    `value` is the task record: every call is appended to its JEV ledger so cost and time
+    stay visible through repair rounds. The previous assessment arrives as `previous`,
+    because the caller replaces `verification` before this runs; `value` is only the
+    fallback for callers that do not replace it. Cancellation of the whole task is the
+    one thing that escapes: a decision layer must not swallow the operator's stop.
     """
     started = time.perf_counter()
     if not getattr(settings, "jev_evidence", False):
@@ -273,16 +303,16 @@ async def collect(settings, value, files, *, client=None, remaining_seconds=None
     if is_hosted(base_url) and not api_key:
         # The hosted service needs a key, so no client is created and nothing is sent.
         return _outcome(value, "skipped", "the hosted TypeSafe endpoint needs an API key",
-                        started, price=price)
+                        started)
     requirements = requirement_lines(value.get("task"))
     if not requirements:
         return _outcome(value, "skipped", "the task states no line that reads as a requirement",
-                        started, price=price)
+                        started)
     included, omitted, truncated, used = select_state(
         Path(settings.workspace_root) / value["id"], files, budget)
     if not included:
         return _outcome(value, "skipped", "the run wrote no readable file to send as evidence",
-                        started, price=price)
+                        started)
     coverage_complete = not omitted and not truncated
     execution = (value.get("verification") or {}).get("execution") or {}
     execution_state = str(execution.get("state") or "not_run")
@@ -293,7 +323,8 @@ async def collect(settings, value, files, *, client=None, remaining_seconds=None
                 "truncated": truncated, "characters": used,
                 "coverage": "complete" if coverage_complete else "incomplete",
                 "execution_state": execution_state}
-    previous = (value.get("verification") or {}).get("jev_evidence") or {}
+    if not isinstance(previous, dict):
+        previous = (value.get("verification") or {}).get("jev_evidence") or {}
     if previous.get("status") == "ran" and previous.get("fingerprint") == fingerprint_value:
         # Same questions, same material, same model and setup: reuse the assessment and
         # keep its original time, so a repair round cannot make it look re-decided.
@@ -308,7 +339,7 @@ async def collect(settings, value, files, *, client=None, remaining_seconds=None
     if remaining_seconds is not None:
         if remaining_seconds <= 1.0:
             return _outcome(value, "skipped", "under a second of the task budget is left",
-                            started, price=price)
+                            started)
         budget_seconds = min(budget_seconds, remaining_seconds - 1.0)
     questions = {
         f"r{index}": noul("Does the delivered project satisfy this requirement from the "
@@ -330,17 +361,20 @@ async def collect(settings, value, files, *, client=None, remaining_seconds=None
     except TimeoutError:
         return _outcome(value, "unavailable",
                         f"the evidence pass exceeded its {budget_seconds:.1f}s budget",
-                        started, model=model, price=price)
+                        started, model=model, attempted=True)
     except JevError as exc:
-        return _outcome(value, "unavailable", str(exc), started, model=model, price=price)
+        return _outcome(value, "unavailable", str(exc), started, model=model, attempted=True)
     except Exception as exc:  # noqa: BLE001 - evidence gathering must never fail a task
         return _outcome(value, "unavailable",
                         f"{type(exc).__name__} while collecting evidence",
-                        started, model=model, price=price)
+                        started, model=model, attempted=True)
     finally:
         if owned and client is not None:
             try:
-                await client.close()
+                # Bound the cleanup too: a slow close must not push the pass past the
+                # budget it was given. Cancellation of the task still wins.
+                async with asyncio.timeout(CLOSE_TIMEOUT):
+                    await client.close()
             except Exception:  # noqa: BLE001 - cleanup must not topple the task
                 pass
     answers = result.get("answers") or {}

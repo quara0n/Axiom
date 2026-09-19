@@ -63,7 +63,10 @@ def test_the_actual_next_action_uses_the_same_vocabulary():
     assert shadow.classify_next(["read_file"], finished=False) == shadow.CONTINUE
     assert shadow.classify_next(["write_file"], finished=False) == shadow.REPAIR
     assert shadow.classify_next([], finished=True) == shadow.FINISH
-    assert shadow.classify_next(["notes.txt"], finished=False) == shadow.RUN_CHECK
+    assert shadow.classify_next(["blender__make_cube"], finished=False) == shadow.RUN_CHECK
+    # A name the harness never accepted is not an action, let alone a runtime check.
+    assert shadow.classify_next(["made_up_tool"], finished=False) == shadow.INSUFFICIENT
+    assert shadow.classify_next([], finished=False) == shadow.INSUFFICIENT
 
 
 def test_only_unchanged_repeated_reads_raise_the_stagnation_signal():

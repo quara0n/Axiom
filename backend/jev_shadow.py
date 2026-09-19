@@ -20,8 +20,8 @@ import asyncio
 import time
 
 from .jev import Jev, JevError, choice, is_hosted
-from .jev_evidence import (cost_of, ledger_add, now, probability, requirement_lines,
-                           select_state)
+from .jev_evidence import (CLOSE_TIMEOUT, cost_of, ledger_add, now, probability,
+                           requirement_lines, select_state)
 
 CONTINUE = "continue_inspection"
 RUN_CHECK = "request_runtime_check"
@@ -83,15 +83,20 @@ def basis(value, role, *, repeated, rounds, remaining_seconds, allows_execution)
 
 def classify_next(tool_names, *, finished):
     """What the workflow actually did next, in the same vocabulary as the options."""
-    if finished or not tool_names:
+    if finished:
         return FINISH
+    if not tool_names:
+        # No tool ran and the role did not finish: that is not a decision, and calling it
+        # "finished" recorded an answer to a question nobody answered.
+        return INSUFFICIENT
     first = next((name for name in tool_names if name), None)
     if first in _WRITE_TOOLS:
         return REPAIR
     if first in _INSPECT_TOOLS:
         return CONTINUE
-    if first and first not in _INSPECT_TOOLS and first not in _WRITE_TOOLS:
-        # An outside tool server is the only other capability the harness grants.
+    if first and "__" in first:
+        # An outside tool server is the only other capability the harness grants, and its
+        # tools arrive namespaced. Anything else is a name the harness never accepted.
         return RUN_CHECK
     return INSUFFICIENT
 
@@ -150,15 +155,19 @@ async def assess(settings, value, role, *, client=None, repeated=False, rounds=0
                                 "followed": None,
                                 "latency_ms": round((time.perf_counter() - started) * 1000)})
         ledger_add(value, {"purpose": "shadow", "status": "unavailable", "reused": False,
-                           "model": getattr(settings, "jev_model", ""), "latency_ms": 0,
-                           "cost": {"value": 0.0, "kind": "estimated",
-                                    "basis": "no request was sent"},
+                           "model": getattr(settings, "jev_model", ""),
+                           "latency_ms": round((time.perf_counter() - started) * 1000),
+                           # A request may have been sent before the failure, so the cost
+                           # is unknown rather than zero.
+                           "cost": {"value": None, "kind": "unknown",
+                                    "basis": "a request was attempted without a reported cost"},
                            "at": now()})
         return entry
     finally:
         if owned and client is not None:
             try:
-                await client.close()
+                async with asyncio.timeout(CLOSE_TIMEOUT):
+                    await client.close()
             except Exception:  # noqa: BLE001 - cleanup must not topple the task
                 pass
     answers = result.get("answers") or {}

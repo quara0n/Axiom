@@ -29,6 +29,10 @@ class Settings:
     # A Planner that has produced nothing after this long is unlikely to. A shorter
     # budget lets the run say so instead of leaving the dashboard on a spinner.
     planner_model_call_timeout: float = 150
+    # How often a call that is still running writes an updated activity line. One
+    # "waiting" line stops being reassuring after a minute: the operator cannot tell a
+    # live run from a dead one.
+    wait_update_seconds: float = 15.0
     # JEV (TypeSafe System One) answers typed questions with probabilities instead
     # of prose. It is a second provider with its own key and endpoint, and it is
     # optional: an empty base URL means the runtime behaves exactly as before.
@@ -112,6 +116,7 @@ class Settings:
             model_call_timeout=max(0.0, min(float(os.getenv("AXIOM_MODEL_CALL_TIMEOUT", "240")), 3600)),
             planner_model_call_timeout=max(
                 0.0, min(float(os.getenv("AXIOM_PLANNER_MODEL_CALL_TIMEOUT", "150")), 3600)),
+            wait_update_seconds=max(0.05, min(float(os.getenv("AXIOM_WAIT_UPDATE_SECONDS", "15")), 300)),
             typesafe_api_key=os.getenv("TYPESAFE_API_KEY", "").strip(),
             jev_base_url=os.getenv("AXIOM_JEV_BASE_URL", "https://api.typesafe.ai/v1").strip(),
             jev_model=os.getenv("AXIOM_JEV_MODEL", "jev-1.13.0").strip(),

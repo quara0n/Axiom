@@ -316,6 +316,45 @@ def provider_for(kind: str, task: BenchTask, settings: Settings):
 
 # ------------------------------------------------------------------------------ cells
 
+def resource_record(value: dict) -> dict:
+    """The resource part of one cell: model usage plus the JEV ledger.
+
+    JEV is a second provider with its own spend, and a benchmark that reads only the
+    model cost reports a run as cheaper than it was. A JEV call whose price is unknown
+    makes the total unknown rather than free, and an unknown model cost still makes the
+    total unknown, exactly as before.
+    """
+    usage = value.get("usage") or {}
+    totals = usage.get("totals") or {}
+    jev = value.get("jev") or {}
+    jev_totals = jev.get("totals") or {}
+    jev_cost = jev_totals.get("cost") or {}
+    model_cost = totals.get("cost")
+    record = {
+        "tokens": {name: totals.get(name) for name in
+                   ("prompt_tokens", "completion_tokens", "reasoning_tokens",
+                    "cached_tokens")},
+        "cost_usd": model_cost,
+        "unknown_usage_calls": totals.get("unknown_calls", 0),
+        "by_role": usage.get("by_role") or {},
+        "jev": {
+            "calls": jev_totals.get("calls", 0),
+            "requests": jev_totals.get("requests", 0),
+            "reused": jev_totals.get("reused", 0),
+            "input_tokens": jev_totals.get("input_tokens", 0),
+            "unknown_cost_calls": jev_totals.get("unknown_cost_calls", 0),
+            "cost_usd": (jev_cost.get("value")
+                         if isinstance(jev_cost.get("value"), (int, float)) else None),
+        },
+    }
+    if jev_totals.get("unknown_cost_calls") or not isinstance(model_cost, (int, float)):
+        record["total_cost_usd"] = None
+    else:
+        record["total_cost_usd"] = round(
+            model_cost + (record["jev"]["cost_usd"] or 0.0), 6)
+    return record
+
+
 def run_cell(task: BenchTask, arm: str, config: Settings, kind: str,
              run_dir: Path, repeat: int, models: dict[str, str] | None = None) -> dict:
     """Run one harness against one task and grade the result.
@@ -362,14 +401,7 @@ def run_cell(task: BenchTask, arm: str, config: Settings, kind: str,
     record["repair_rounds"] = value.get("repair_round")
     record["harness_verdict"] = value.get("review_verdict")
     record["files"] = value.get("files") or []
-    usage = value.get("usage") or {}
-    totals = usage.get("totals") or {}
-    record["tokens"] = {name: totals.get(name) for name in
-                        ("prompt_tokens", "completion_tokens", "reasoning_tokens",
-                         "cached_tokens")}
-    record["cost_usd"] = totals.get("cost")
-    record["unknown_usage_calls"] = totals.get("unknown_calls", 0)
-    record["by_role"] = usage.get("by_role") or {}
+    record.update(resource_record(value))
     verification = value.get("verification") or {}
     record["verification"] = {"mode": verification.get("mode"),
                               "runtime_tested": verification.get("runtime_tested")}
@@ -414,9 +446,17 @@ def summarize(records: list[dict]) -> dict:
         # not appear as a complete (artificially cheap) cost per solved task.
         costs = [record["cost_usd"] for record in cells
                  if isinstance(record["cost_usd"], (int, float))]
+        # Records that predate the JEV ledger carry only the model cost.
+        def total_of(record):
+            value = record.get("total_cost_usd", record.get("cost_usd"))
+            return value if isinstance(value, (int, float)) else None
+
+        totals = [total_of(record) for record in cells if total_of(record) is not None]
         prompts = [record["tokens"]["prompt_tokens"] for record in cells
                    if isinstance(record["tokens"]["prompt_tokens"], (int, float))]
-        usage_complete = not any(record.get("unknown_usage_calls") for record in cells)
+        usage_complete = (not any(record.get("unknown_usage_calls") for record in cells)
+                          and not any((record.get("jev") or {}).get("unknown_cost_calls", 0)
+                                      for record in cells))
         summary[arm] = {
             "cells": len(cells),
             "solved": len(solved),
@@ -424,8 +464,14 @@ def summarize(records: list[dict]) -> dict:
             "wilson95": wilson_interval(len(solved), len(cells)),
             "median_wall_ms": _median([record["wall_ms"] for record in cells]),
             "median_cost_usd": _median([record["cost_usd"] for record in cells]),
-            "cost_per_solve_usd": (round(sum(costs) / len(solved), 4)
-                                   if solved and usage_complete and len(costs) == len(cells) else None),
+            "median_total_cost_usd": _median([record.get("total_cost_usd") for record in cells]),
+            "cost_per_solve_usd": (round(sum(totals) / len(solved), 4)
+                                   if solved and usage_complete and len(totals) == len(cells) else None),
+            "jev_calls": sum((record.get("jev") or {}).get("calls", 0) for record in cells),
+            "jev_requests": sum((record.get("jev") or {}).get("requests", 0) for record in cells),
+            "jev_cost_usd": round(sum(
+                (record.get("jev") or {}).get("cost_usd") for record in cells
+                if isinstance((record.get("jev") or {}).get("cost_usd"), (int, float))), 6),
             "prompt_tokens_per_solve": (round(sum(prompts) / len(solved))
                                         if solved and usage_complete and len(prompts) == len(cells) else None),
             "cells_without_usage": sum(1 for record in cells
@@ -466,7 +512,8 @@ def render_report(run: dict) -> str:
 
     lines += ["## Result per arm", "",
               "| Arm | Solved | Solve rate | Wilson 95% | Median wall | Median cost | "
-              "Cost per solve | Prompt tokens per solve | Model calls |", "|---|---|---|---|---|---|---|---|---|"]
+              "Cost per solve | Prompt tokens per solve | Model calls | JEV calls | JEV cost |",
+              "|---|---|---|---|---|---|---|---|---|---|---|"]
     for arm, row in summary.items():
         cost = f"${row['cost_per_solve_usd']:.3f}" if row["cost_per_solve_usd"] is not None else "n/a"
         median_cost = (f"${row['median_cost_usd']:.3f}"
@@ -476,7 +523,8 @@ def render_report(run: dict) -> str:
             f"| {arm} | {row['solved']}/{row['cells']} | {row['solve_rate']:.1%} | "
             f"[{row['wilson95'][0]:.3f}, {row['wilson95'][1]:.3f}] | "
             f"{_seconds(row['median_wall_ms'])} | {median_cost} | {cost} | {tokens} | "
-            f"{row['median_model_calls']} |")
+            f"{row['median_model_calls']} | {row['jev_calls']} | "
+            f"${row['jev_cost_usd']:.4f} |")
     lines.append("")
 
     lines += ["Per-solve resources include every attempted cell, including failures. "

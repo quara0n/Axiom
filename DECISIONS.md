@@ -612,3 +612,17 @@ whether a judgement about a running artifact is any good.
 Shadow mode is opt-in and unmeasured, the recommendation options are a first guess, and
 nothing here routes, skips a role, grants a capability or changes a verdict. Whether any
 of it reduces unnecessary calls or cost is still an open question.
+
+**Revision after review.** Seven gaps were found in the first version and closed:
+classification now defaults to `unknown` rather than to source, so a formulation nobody
+classified inherits no confidence and only named shapes are treated as readable from
+source; the previous assessment is passed in explicitly because the caller replaces the
+verification record before the pass runs, which is why reuse never fired; an attempted
+request with no reported cost is `unknown` rather than $0, and the benchmark adds the JEV
+ledger to the cell total; a call in flight when the operator cancels is written to the
+ledger before the cancellation continues; the client cleanup is bounded as well as the
+call; and a shadow recommendation is resolved only from calls that were accepted and
+executed, with an empty reply resolving nothing and a genuine finish recorded only when
+the role returns its report. The classification of behaviour remains deliberately
+conservative: reading source never confirms and never refutes it, however confident the
+answer.

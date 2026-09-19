@@ -12,7 +12,8 @@ from .provider import ProviderError
 from .coordination import DEFAULT_PROJECT_INSTRUCTIONS, compact_messages, handoff_text, report_tool, read_team_report
 from .control import RepeatGuard, complete_with_limits, trace_tool, route_tools
 from .jev_evidence import collect as collect_jev_evidence
-from .jev_shadow import assess as assess_next_action, classify_next, note_next_action
+from .jev_shadow import (FINISH, assess as assess_next_action, classify_next,
+                         note_next_action)
 from .continuation import prepare_continuation
 from .delegation import DELEGATION_NAMES, Delegation, delegation_tools
 from .mcp import McpError
@@ -261,6 +262,19 @@ class Runtime:
             return self.settings.planner_model_call_timeout
         return self.settings.model_call_timeout
 
+    async def watch_wait(self, value, label, role, model, started, budget):
+        """Keep saying what is happening while a slow call is still running.
+
+        A single "waiting" line stops being reassuring after a minute, and an operator
+        should not have to guess whether the run is alive. Until the call returns or is
+        cut, the activity record gets an updated line with the elapsed time.
+        """
+        while True:
+            await asyncio.sleep(self.settings.wait_update_seconds)
+            waited = round(time.monotonic() - started)
+            self.event(value, label, f"{role} is still waiting for {model} — {waited}s"
+                       + (f" of {budget:.0f}s." if budget else "."))
+
     def record_usage(self, value, role, label, model, message=None, error=None):
         """Record one model call from what the provider reported about it.
 
@@ -420,6 +434,10 @@ class Runtime:
         scope_failures = check_files(workspace.constraints, workspace.files())
         validation_errors.extend(name for name in scope_failures if name not in validation_errors)
         value["validation_errors"] = validation_errors
+        # The verification record is replaced here, so the previous JEV assessment has to
+        # be taken out before it goes: otherwise the module never sees it and an identical
+        # validation asks JEV again instead of reusing the answer.
+        previous_assessment = (value.get("verification") or {}).get("jev_evidence")
         value["verification"] = {"mode": "static_only", "runtime_tested": False,
                                  "visually_tested": False, "checks": checks,
                                  "unsupported_files": unsupported,
@@ -435,6 +453,7 @@ class Runtime:
         # reused inside the module instead of being asked twice.
         remaining = self.deadlines.get(value["id"], float("inf")) - time.monotonic()
         evidence = await collect_jev_evidence(self.settings, value, workspace.files(),
+                                              previous=previous_assessment,
                                               remaining_seconds=remaining)
         if evidence is not None:
             value["verification"]["jev_evidence"] = evidence
@@ -617,9 +636,15 @@ class Runtime:
                 self.event(value, label, f"{role} is waiting for {model}"
                            + (f" (budget {budget:.0f}s)." if budget else "."))
                 if budget:
-                    async with asyncio.timeout(budget):
-                        message = await complete_with_limits(self.provider, self.settings, model,
-                                                             messages, turn_tools, role, recovery)
+                    watcher = asyncio.create_task(
+                        self.watch_wait(value, label, role, model, call_started, budget))
+                    try:
+                        async with asyncio.timeout(budget):
+                            message = await complete_with_limits(
+                                self.provider, self.settings, model, messages, turn_tools,
+                                role, recovery)
+                    finally:
+                        watcher.cancel()
                 else:
                     message = await complete_with_limits(self.provider, self.settings, model,
                                                          messages, turn_tools, role, recovery)
@@ -633,6 +658,12 @@ class Runtime:
                     f"{role} waited {waited}s for {model} and was stopped at its "
                     f"{budget:.0f}s call budget. Raise AXIOM_MODEL_CALL_TIMEOUT, or choose a "
                     "faster model for this role.") from None
+            except asyncio.CancelledError:
+                # A call in flight when the operator stopped the task may still have been
+                # billed, so it goes into the ledger as unknown consumption before the
+                # cancellation continues on its way.
+                self.record_usage(value, role, label, model, error="CancelledError")
+                raise
             except ProviderError as exc:
                 # A failed or retried call is part of what the run cost.
                 self.record_usage(value, role, label, model, error=type(exc).__name__)
@@ -641,11 +672,6 @@ class Runtime:
             if not isinstance(message, dict):
                 raise ProviderError("OpenRouter returned an invalid assistant message.")
             calls = message.get("tool_calls") or []
-            # Attach what the workflow actually does next to the last shadow
-            # recommendation, so a recommendation and a followed one stay distinct.
-            names = [call["function"].get("name") for call in calls
-                     if isinstance(call, dict) and isinstance(call.get("function"), dict)]
-            note_next_action(value, classify_next(names, finished=not calls))
             content = message.get("content")
             if content is not None and not isinstance(content, str):
                 raise ProviderError("OpenRouter returned unsupported message content.")
@@ -720,10 +746,14 @@ class Runtime:
                             '"your full readable report"} and nothing else.' )})
                         continue
                     value["review_verdict"] = report["verdict"]
+                    note_next_action(value, FINISH)
                     return report["summary"]
+                # A role that returns its report is the only real "finished" action.
+                note_next_action(value, FINISH)
                 return content
             nudges["empty"] = 0
             recovery = False
+            batch_tools = []
             for call in calls:
                 call_id = call.get("id") if isinstance(call, dict) else None
                 if not isinstance(call_id, str):
@@ -787,6 +817,7 @@ class Runtime:
                                   "Use this evidence to finish, or change your approach."}
                     if name != "read_team_report" and not result.get("error"):
                         successful_tools.add(name)
+                        batch_tools.append(name)
                     if ((name in {"write_file", "edit_file"} and result.get("diff") != "No textual change.")
                             or (name == "integrate_worker" and result.get("applied"))):
                         guard.reads.clear()
@@ -831,6 +862,11 @@ class Runtime:
                     allows_execution=bool(self.settings.allow_execution),
                     repair_round=value.get("repair_round", 0))
                 stagnation = False
+            if batch_tools:
+                # What the workflow actually did, taken from calls that were accepted and
+                # executed - never from what the model asked for. A rejected or invented
+                # tool name is not an action, and an empty answer is not a decision.
+                note_next_action(value, classify_next(batch_tools, finished=False))
         raise ProviderError(
             f"{role} exceeded its work round limit ({self.settings.max_tool_rounds}) after "
             "changing the project that many times. Raise AXIOM_MAX_TOOL_ROUNDS or split the task.")

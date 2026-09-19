@@ -109,6 +109,32 @@ harness actually allow, is capped per task and time-limited, and stores each
 recommendation next to what the workflow actually did, so a "followed" rate can be
 measured later. It changes no permission, tool menu, role or verdict.
 
+A review of the first version found seven gaps, all now closed with tests through the
+runtime flow rather than only through the module:
+
+- **Classification defaults to unresolved.** Source could settle anything it did not
+  recognise, so "the game must restart when R is used" could be `supported` without ever
+  running it. Only named shapes - a file count, a forbidden reference, a string that must
+  be present - are `source`; behaviour is `runtime` and everything else is `unknown`, and
+  neither of those two is ever a confirmation or a defect.
+- **Reuse actually happens.** `validate` replaces the verification record before the pass
+  runs, so the module never saw the previous assessment and asked JEV again. The previous
+  assessment is now taken out before the record is replaced and passed in explicitly.
+- **Cost tells the truth about attempts.** A request that was attempted and never
+  reported was recorded as $0 with "no request was sent". "Not sent" and "sent, cost
+  unknown" are now distinct, and the benchmark reads the JEV ledger and adds it to the
+  cell total instead of reporting the model cost alone.
+- **A cancelled call is recorded.** After two started calls and a cancel, the ledger held
+  one entry. The in-flight call is now written as unknown consumption before the
+  cancellation continues.
+- **Cleanup is bounded.** `client.close()` sat outside the pass budget, so a slow close
+  could exceed it. Closing now has its own small bound and still yields to cancellation.
+- **Shadow records actions, not claims.** An empty reply was recorded as
+  `finish_with_report, followed=true` while the agent continued, and invented tool names
+  were classified as runtime checks. Resolution now uses only calls that were accepted
+  and executed, an empty reply resolves nothing, and a genuine finish is recorded when
+  the role actually returns its report.
+
 Still unimplemented/unmeasured: JEV-driven routing and tool decisions, a calibration
 study on our own labelled tasks, live comparative quality and cost, live subagent
 quality, container isolation/process-tree cancellation, browser interaction checks,

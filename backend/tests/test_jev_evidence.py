@@ -1,6 +1,7 @@
 """Offline tests for the JEV evidence pass. No network, no key, no TypeSafe account."""
 
 import asyncio
+import time
 
 import pytest
 
@@ -44,6 +45,16 @@ class NeverConstructed:
     def __init__(self, *args, **kwargs):
         NeverConstructed.created += 1
         raise AssertionError("no client may be created here")
+
+
+class CountingJev(FakeJev):
+    """A scripted client that can be handed to the module as if it were the real one."""
+
+    made = 0
+
+    def __init__(self, answers=None):
+        super().__init__(answers)
+        CountingJev.made += 1
 
 
 def settings(tmp_path, **overrides):
@@ -98,7 +109,27 @@ def test_behaviour_cannot_be_settled_by_reading_source():
     assert evidence.classify("The controls must respond to the keyboard.") == "runtime"
     assert evidence.classify("The touch buttons must not cover the character.") == "runtime"
     assert evidence.classify("The interface text must be Norwegian.") == "source"
-    assert evidence.classify("There must be three levels.") == "source"
+    # "three levels" is not a shape a reader can decide on its own, so it stays unknown.
+    assert evidence.classify("There must be three levels.") == "unknown"
+
+
+def test_only_the_shapes_a_reader_can_check_are_source_claims():
+    # Named shapes: a file count, a forbidden reference, a string that must be present.
+    assert evidence.classify("It must be one HTML file with no network calls.") == "source"
+    assert evidence.classify("It must contain the word hello.") == "source"
+    assert evidence.classify("The interface text must be Norwegian.") == "source"
+    assert evidence.classify("There must be no dependency manifest.") == "source"
+    # Behaviour is never source, however plausible it sounds.
+    assert evidence.classify("The controls must respond to the keyboard.") == "runtime"
+    assert evidence.classify("The game must restart when R is used.") == "runtime"
+
+
+def test_an_unrecognised_requirement_inherits_no_confidence():
+    # A formulation nobody classified must not fall back to the confidence of one that
+    # was: it is unknown, and unknown never confirms and never condemns.
+    assert evidence.classify("The build must be reproducible.") == "unknown"
+    assert evidence.verdict(0.99, "unknown", True) == "insufficient_evidence"
+    assert evidence.verdict(0.01, "unknown", True) == "insufficient_evidence"
 
 
 def test_the_claim_depends_on_the_evidence_and_not_on_confidence():
@@ -358,3 +389,67 @@ def test_an_unavailable_pass_leaves_the_workflow_alone(tmp_path, monkeypatch):
     assert value["verification"]["jev_evidence"]["status"] == "unavailable"
     assert any("JEV evidence unavailable" in event["text"] for event in value["events"])
     assert value["verification"]["checks"]
+
+
+def test_a_failed_request_is_unknown_spend_not_zero(tmp_path):
+    project(tmp_path)
+    config = settings(tmp_path, jev_base_url="http://127.0.0.1:8123/v1")
+    value = task_value()
+    run(config, value, ["index.html"], client=FakeJev(error=JevError("JEV returned HTTP 503.")))
+    entry = value["jev"]["calls"][0]
+    # A request that was attempted and never reported is unknown, not free.
+    assert entry["cost"]["kind"] == "unknown"
+    assert entry["cost"]["value"] is None
+    assert value["jev"]["totals"]["unknown_cost_calls"] == 1
+    # A pass that sent nothing is still recorded as free.
+    skipped = task_value(task="Make it nice.")
+    run(config, skipped, ["index.html"], client=FakeJev({}))
+    assert skipped["jev"]["calls"][0]["cost"]["basis"] == "no request was sent"
+
+
+def test_an_identical_basis_survives_a_replaced_verification_record(tmp_path, monkeypatch):
+    """Two validations with nothing changed ask JEV once and reuse the answer.
+
+    The caller replaces `verification` before the pass runs, so the previous assessment
+    has to arrive explicitly; reading it back out of the record found nothing and asked
+    again.
+    """
+    project(tmp_path)
+    config = settings(tmp_path, jev_base_url="http://127.0.0.1:8123/v1")
+    store = Store(config.database)
+    value = store.create("Write notes.txt that must contain the word hello.", "test/model")
+    root = config.workspace_root / value["id"]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "notes.txt").write_text("hello", encoding="utf-8")
+    CountingJev.made = 0
+    client = CountingJev({"r0": {"type": "noul", "noul": 0.9}})
+    monkeypatch.setattr(evidence, "Jev", lambda *args, **kwargs: client)
+    runtime = Runtime(config, store, object())
+    asyncio.run(runtime.validate({"value": value}))
+    first = value["verification"]["jev_evidence"]
+    assert first["status"] == "ran" and first["reused"] is False
+    asyncio.run(runtime.validate({"value": value}))
+    second = value["verification"]["jev_evidence"]
+    assert second["reused"] is True
+    assert second["assessment_at"] == first["assessment_at"]
+    assert CountingJev.made == 1
+    assert len(client.requests) == 1
+
+
+def test_a_slow_cleanup_cannot_exceed_the_pass_budget(tmp_path, monkeypatch):
+    project(tmp_path)
+    config = settings(tmp_path, jev_base_url="http://127.0.0.1:8123/v1", jev_time_budget=1.0)
+    value = task_value(task="- The interface text must be Norwegian.")
+
+    class SlowClose(CountingJev):
+        async def close(self):
+            await asyncio.sleep(10)
+
+    monkeypatch.setattr(evidence, "Jev", lambda *args, **kwargs: SlowClose(
+        {"r0": {"type": "noul", "noul": 0.9}}))
+    started = time.monotonic()
+    result = run(config, value, ["index.html"])
+    elapsed = time.monotonic() - started
+    # The answer still arrives, and the hanging cleanup is bounded rather than awaited.
+    assert result["status"] == "ran"
+    assert elapsed < evidence.CLOSE_TIMEOUT + 1.5
