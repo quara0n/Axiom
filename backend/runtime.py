@@ -530,7 +530,17 @@ class Runtime:
         stalled = fingerprint == value.get("last_review_fingerprint")
         value["last_review_fingerprint"] = fingerprint
         execution_failed = value["verification"].get("execution", {}).get("state") == "failed"
-        if value["validation_errors"] or execution_failed or value.get("review_verdict") != "approved":
+        # This is the one place JEV reaches the control flow. A requirement the task stated
+        # itself, readable from source, contradicted over complete evidence, is worth one
+        # repair round rather than a note nobody acts on. It can only add a reason to
+        # repair: it never clears a failure and never approves. One round per task, so a
+        # false positive costs a pass rather than a loop.
+        jev = (value.get("verification") or {}).get("jev_evidence") or {}
+        contradictions = [item for item in (jev.get("findings") or [])
+                          if item.get("verdict") == "contradicted"]
+        jev_repair = bool(contradictions) and not value.get("jev_repair_used")
+        if (value["validation_errors"] or execution_failed
+                or value.get("review_verdict") != "approved" or jev_repair):
             if value["repair_round"] < self.settings.max_repair_rounds and not stalled:
                 value["repair_round"] += 1
                 # The Tester's findings and the verification record already reach the
@@ -541,6 +551,20 @@ class Runtime:
                     "note": "Tester findings and the static verification record are the "
                             "prior_results and verification fields of this message.",
                 }
+                if jev_repair:
+                    value["jev_repair_used"] = True
+                    value["repair_feedback"]["jev_findings"] = [
+                        {"requirement": item.get("requirement"),
+                         "kind": item.get("kind"), "probability": item.get("probability"),
+                         "verdict": item.get("verdict")} for item in contradictions]
+                    value["repair_feedback"]["jev_note"] = (
+                        "JEV, a probabilistic decision source, reports these stated "
+                        "requirements as contradicted over complete evidence. Treat each as a "
+                        "hypothesis to check against the files: fix what is genuinely missing "
+                        "and say what you could not confirm.")
+                    self.event(value, "System",
+                               f"JEV reports {len(contradictions)} stated requirement(s) as "
+                               "contradicted over complete evidence; sending them to Coder.")
                 value["review_verdict"] = None
                 value["summary"] = "Repair in progress. " + previous["Reviewer"]
                 for agent in value["agents"]:
@@ -554,6 +578,14 @@ class Runtime:
             self.event(value, "System", value["error"])
         else:
             value["status"] = "completed"
+            if contradictions:
+                # JEV had its one repair round and the contradiction is still there. Say so:
+                # "completed" must not read as "every finding was resolved", and the record
+                # keeps the requirements for whoever reads it next.
+                value["jev_unresolved"] = [item.get("requirement") for item in contradictions]
+                self.event(value, "System",
+                           f"Completed with {len(value['jev_unresolved'])} JEV finding(s) still "
+                           "contradicted; they stay in the record for review.")
             self.event(value, "System", "All agents finished. Review the report for verification limits.")
         return {"value": value}
 
