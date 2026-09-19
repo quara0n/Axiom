@@ -410,10 +410,13 @@ def summarize(records: list[dict]) -> dict:
         if not cells:
             continue
         solved = [record for record in cells if record["solved"]]
-        costs = [record["cost_usd"] for record in solved
+        # All attempts consume resources, including failures. Partial usage must
+        # not appear as a complete (artificially cheap) cost per solved task.
+        costs = [record["cost_usd"] for record in cells
                  if isinstance(record["cost_usd"], (int, float))]
-        prompts = [record["tokens"]["prompt_tokens"] for record in solved
+        prompts = [record["tokens"]["prompt_tokens"] for record in cells
                    if isinstance(record["tokens"]["prompt_tokens"], (int, float))]
+        usage_complete = not any(record.get("unknown_usage_calls") for record in cells)
         summary[arm] = {
             "cells": len(cells),
             "solved": len(solved),
@@ -422,9 +425,9 @@ def summarize(records: list[dict]) -> dict:
             "median_wall_ms": _median([record["wall_ms"] for record in cells]),
             "median_cost_usd": _median([record["cost_usd"] for record in cells]),
             "cost_per_solve_usd": (round(sum(costs) / len(solved), 4)
-                                   if costs and solved else None),
+                                   if solved and usage_complete and len(costs) == len(cells) else None),
             "prompt_tokens_per_solve": (round(sum(prompts) / len(solved))
-                                        if prompts and solved else None),
+                                        if solved and usage_complete and len(prompts) == len(cells) else None),
             "cells_without_usage": sum(1 for record in cells
                                        if record.get("unknown_usage_calls")),
             "median_model_calls": _median([record["model_calls"] for record in cells]),
@@ -476,7 +479,9 @@ def render_report(run: dict) -> str:
             f"{row['median_model_calls']} |")
     lines.append("")
 
-    lines += ["## Cell matrix", "",
+    lines += ["Per-solve resources include every attempted cell, including failures. "
+              "They are n/a when usage is incomplete or no task was solved.", "",
+              "## Cell matrix", "",
               "| Task | " + " | ".join(run["arms"]) + " |", "|---|" + "---|" * len(run["arms"])]
     for task in run["tasks"]:
         cells = []

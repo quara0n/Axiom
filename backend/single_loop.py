@@ -12,15 +12,13 @@ Workspace boundary and the same usage ledger. It is a measurement baseline, not 
 second product. The dashboard never selects it, and it cannot delegate.
 """
 
-import hashlib
 import json
+import time
 
 from .coordination import compact_messages
+from .control import RepeatGuard, complete_with_limits, trace_tool
 from .provider import ProviderError
 from .workspace import READ_ONLY_TOOLS, Workspace, single_tools
-
-# Reading many different files is diligence; reading the same one five times is a loop.
-MAX_REPEATED_CALLS = 4
 
 # The only calls that change the project. Inspection does not count against the
 # work-round budget, exactly as in the four-role graph, so the two arms are bounded
@@ -48,12 +46,13 @@ class SingleLoop:
         self.runtime = runtime
         self.value = value
         self.workspace = workspace or Workspace(
-            runtime.settings.workspace_root / value["id"], value.setdefault("checks", {}))
+            runtime.settings.workspace_root / value["id"], value.setdefault("checks", {}),
+            value.get("constraints"))
         self.model = model or value.get("model") or runtime.settings.model
 
     def context(self):
         return {"task": self.value["task"], "project_instructions": self.value.get(
-            "instructions_snapshot", "")}
+            "instructions_snapshot", ""), "constraints": self.workspace.constraints}
 
     async def run(self):
         value, workspace, runtime = self.value, self.workspace, self.runtime
@@ -64,14 +63,17 @@ class SingleLoop:
         ]
         nudges = {"empty": 0, "truncated": 0}
         work_rounds = 0
-        repeats = {}
+        guard = RepeatGuard()
+        recovery = False
         while work_rounds <= runtime.settings.max_tool_rounds:
             if value.get("model_calls", 0) >= runtime.settings.max_model_calls:
                 raise ProviderError("Task exceeded its total model-call budget.")
             value["model_calls"] = value.get("model_calls", 0) + 1
-            compact_messages(messages)
+            if compact_messages(messages):
+                guard.reads.clear()
             try:
-                message = await runtime.provider.complete(self.model, messages, tools)
+                message = await complete_with_limits(runtime.provider, runtime.settings,
+                                                     self.model, messages, tools, ROLE, recovery)
             except ProviderError as exc:
                 runtime.record_usage(value, ROLE, ROLE, self.model, error=type(exc).__name__)
                 raise
@@ -89,9 +91,12 @@ class SingleLoop:
                 assistant["tool_calls"] = calls
             messages.append(assistant)
             if not calls:
+                if message.get("finish_reason") == "length":
+                    content = None
                 if not content or not content.strip():
                     if message.get("finish_reason") == "length":
                         nudges["truncated"] += 1
+                        recovery = True
                         if nudges["truncated"] > 1:
                             raise ProviderError(
                                 f"{ROLE} was cut off at the output limit "
@@ -110,16 +115,25 @@ class SingleLoop:
                         "Your last message was empty. Continue the task: use the workspace "
                         "tools to obtain evidence, and write the required files.")})
                     continue
-                return content[:24000]
+                return content
+            nudges["empty"] = 0
+            recovery = False
             for call in calls:
                 call_id = call.get("id") if isinstance(call, dict) else None
                 if not isinstance(call_id, str):
                     raise ProviderError("OpenRouter returned an invalid tool call ID.")
                 name, args = None, {}
+                started, result, outcome = time.perf_counter(), None, "failed"
+                observed = False
                 try:
                     function = call["function"]
                     name = function["name"]
+                    if not isinstance(name, str):
+                        name = None
+                        raise ValueError("Tool name must be a string.")
                     if name in WORK_TOOLS:
+                        if work_rounds >= runtime.settings.max_tool_rounds:
+                            raise ProviderError(f"{ROLE} exceeded its work round limit.")
                         work_rounds += 1
                     arguments = function["arguments"]
                     if not isinstance(arguments, str) or len(arguments) > 150000:
@@ -127,43 +141,44 @@ class SingleLoop:
                     args = json.loads(arguments)
                     if not isinstance(args, dict):
                         raise ValueError("Tool arguments must be an object.")
-                    signature = f"{name} {args.get('path') or args.get('query') or ''}".strip()
-                    argument_digest = hashlib.sha256(
-                        json.dumps(args, sort_keys=True).encode()).hexdigest()
+                    warning = False
                     if name not in READ_ONLY_TOOLS:
-                        repeat_key = (name, argument_digest)
-                        repeats[repeat_key] = repeats.get(repeat_key, 0) + 1
-                        if repeats[repeat_key] > MAX_REPEATED_CALLS:
-                            raise ProviderError(
-                                f"{ROLE} repeated {signature} without reaching a conclusion. "
-                                "Report what you have found so far, or say what is blocking you.")
+                        observed = True
+                        warning = guard.observe(name, args)
+                    if name not in {tool["function"]["name"] for tool in tools}:
+                        raise ValueError("This tool is not available to this role.")
                     result = workspace.call(name, args, "Coder")
                     if name in READ_ONLY_TOOLS:
-                        failed = isinstance(result, dict) and "error" in result
-                        material = argument_digest if failed else hashlib.sha256(
-                            (argument_digest + json.dumps(result, sort_keys=True,
-                                                         ensure_ascii=False)).encode()).hexdigest()
-                        repeat_key = (name, material)
-                        repeats[repeat_key] = repeats.get(repeat_key, 0) + 1
-                        if repeats[repeat_key] > MAX_REPEATED_CALLS:
-                            raise ProviderError(
-                                f"{ROLE} repeated {signature} without reaching a conclusion: the "
-                                f"call returned the same result {repeats[repeat_key]} times and "
-                                "the project did not change. Change what you are doing, or report "
-                                "what is blocking you.")
+                        observed = True
+                        warning = guard.observe(name, args, result, read=True)
+                    if warning:
+                        result = {**result, "loop_warning": "No new progress after four identical calls. "
+                                  "Use the evidence to finish or change your approach."}
                     if name in WORK_TOOLS:
                         value["files"] = workspace.files()
+                        if result.get("diff") != "No textual change.":
+                            guard.reads.clear()
                     runtime.event(value, ROLE, f"Tool {name}: {args.get('path', 'workspace')}")
+                    outcome = "completed"
                 except (ValueError, KeyError, TypeError, OSError, SyntaxError) as exc:
                     value["tool_failures"] = value.get("tool_failures", 0) + 1
                     result = {"error": type(exc).__name__,
                               "message": workspace.error_message(exc)}
+                    if not observed and name in READ_ONLY_TOOLS:
+                        try:
+                            guard.observe(name, args, {"error": type(exc).__name__}, read=True)
+                        except ValueError:
+                            result["message"] = "This read keeps failing. Change the arguments or report the blocker."
                     path = args.get("path") if isinstance(args, dict) else None
                     detail = " ".join(part for part in (name, path)
                                       if isinstance(part, str) and part)
                     runtime.event(value, ROLE,
                                   f"Tool call rejected: {detail or 'invalid call'} "
                                   f"({type(exc).__name__}).")
+                finally:
+                    trace_tool(value, ROLE, call_id, name, args if isinstance(args, dict) else {},
+                               started, result, outcome)
+                    runtime.store.save(value)
                 messages.append({"role": "tool", "tool_call_id": call_id,
                                  "content": json.dumps(result, ensure_ascii=False)})
         raise ProviderError(

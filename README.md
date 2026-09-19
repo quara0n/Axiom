@@ -19,19 +19,24 @@ connection…". A key set in the real environment or in `.env` still takes prece
 
 `backend/runtime.py` uses a compiled LangGraph `StateGraph`:
 
-```text
-START -> Planner -> Coder -> static checks -> Tester -> Reviewer -> decision
-                      ^                                             |
-                      +------------ repair findings ----------------+
-                                                                    |
-                                                                   END
+```mermaid
+flowchart TD
+    Planner --> Coder
+    Coder --> Checks{"Static and scope checks"}
+    Checks -->|Pass| Execute["Declared check, when enabled"]
+    Checks -->|Fail| Tester
+    Execute --> Tester
+    Tester --> Reviewer
+    Reviewer --> Gate{"Verification and verdict"}
+    Gate -->|Bounded repair| Coder
+    Gate -->|Finish| End["Completed or failed"]
 ```
 
 Planner owns architecture, module interfaces, acceptance criteria and milestones.
 Coder is the sole code writer and integrates the product. Tester and Reviewer
 inspect the result independently of Coder; they do not write competing versions.
 Static validation runs before their reports, so failures are available as evidence.
-Reviewer rejection or parser failures return the findings to Coder, followed by
+Reviewer rejection, parser failures or failed executed checks return the findings to Coder, followed by
 fresh validation, testing and review. The plan is retained instead of regenerated.
 
 `AXIOM_MAX_REPAIR_ROUNDS` defaults to 2 additional passes (0 disables repair).
@@ -49,6 +54,52 @@ individual model selection and bounded workspace tool loops.
 These checks parse source; they do not execute generated applications.
 Timeouts, cancellation, concurrency limits and SQLite task/event snapshots remain
 managed by the local runtime. No LangGraph server or LangSmith account is required.
+
+### Reliability controls
+
+`AXIOM_REPORT_MAX_TOKENS` caps Planner, Tester and Reviewer output at 8192 by default.
+Coder retains `AXIOM_MAX_TOKENS`. One recovery after an output-limit truncation uses
+at most 4096 output tokens and requests at most 512 reasoning tokens; these limits
+are per call, so concurrent workers cannot change one another's provider settings.
+A truncated final report is never accepted as complete.
+
+Identical calls get a warning on the fourth occurrence, corrective errors on the
+fifth and sixth, and a hard stop on the seventh. Rejected mutations are not executed.
+Changed source and actual context compaction allow evidence to be read again.
+The existing work, model-call, repair and wall-clock limits remain hard bounds.
+
+Long handoffs contain role-relevant source excerpts with offsets. `read_team_report`
+retrieves exact pages from eligible current-round reports or the explicitly selected
+continuation parent (`Previous/Role`). Reading another agent's report does not count
+as independent workspace evidence. Full completed reports remain in SQLite.
+
+The static verification stage performs a fresh parse. Later cached reads retain its
+content hash, parser version and timestamp. Failed executed checks block completion;
+a successful build alone does not mean runtime tests passed. Tool traces record
+durations, outcomes and argument hashes without copying search text or write bodies.
+
+Optional exact file contracts can be supplied to `POST /api/tasks`:
+
+```json
+{
+  "task": "Build a standalone game in index.html",
+  "constraints": {
+    "allowed_files": ["index.html"],
+    "forbidden_files": ["package.json", "serve.py"]
+  }
+}
+```
+
+Paths are exact, relative and case-insensitive. Omit `allowed_files` to permit other
+files; an empty allowed list permits none. The contract covers writes, edits,
+delegation, integration and final file validation, and carries into continuations.
+Natural-language restrictions are not automatically converted to this contract.
+The runtime-owned root `AGENTS.md` is exempt from the final file list check.
+For tasks with an active file contract, MCP and local execution are unavailable
+because those processes cannot enforce the confined tools' write restrictions.
+Other tasks keep their existing execution/MCP opt-ins. No OS sandbox is implied.
+
+See [the implementation assessment and next experiments](docs/research/2026-09-19-harness-reliability.md).
 
 ### Coder subagents
 

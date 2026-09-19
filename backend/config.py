@@ -19,6 +19,7 @@ class Settings:
     max_workers: int = 3
     max_subagents_per_task: int = 6
     max_tokens: int = 32768
+    report_max_tokens: int = 8192
     reasoning_max_tokens: int = 2048
     request_timeout: float = 180
     # JEV (TypeSafe System One) answers typed questions with probabilities instead
@@ -84,6 +85,7 @@ class Settings:
             max_workers=max(1, min(int(os.getenv("AXIOM_MAX_WORKERS", "3")), 3)),
             max_subagents_per_task=max(1, min(int(os.getenv("AXIOM_MAX_SUBAGENTS_PER_TASK", "6")), 12)),
             max_tokens=max(1024, min(int(os.getenv("AXIOM_MAX_TOKENS", "32768")), 200000)),
+            report_max_tokens=max(1024, min(int(os.getenv("AXIOM_REPORT_MAX_TOKENS", "8192")), 32768)),
             reasoning_max_tokens=max(0, min(int(os.getenv("AXIOM_REASONING_MAX_TOKENS", "2048")), 100000)),
             request_timeout=max(30, min(float(os.getenv("AXIOM_REQUEST_TIMEOUT", "180")), 1800)),
             typesafe_api_key=os.getenv("TYPESAFE_API_KEY", "").strip(),

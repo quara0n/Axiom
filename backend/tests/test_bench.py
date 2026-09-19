@@ -51,6 +51,33 @@ def test_wilson_interval_brackets_the_estimate():
     assert high - low < 0.2
 
 
+def usage_cell(solved, cost, prompts=100, unknown=0):
+    return {"arm": "roles", "solved": solved, "cost_usd": cost,
+            "tokens": {"prompt_tokens": prompts}, "unknown_usage_calls": unknown,
+            "wall_ms": 10, "model_calls": 1}
+
+
+def test_cost_per_solve_includes_failed_attempts():
+    result = summarize([usage_cell(True, 1), usage_cell(False, 9, 900)])["roles"]
+    assert result["solve_rate"] == 0.5
+    assert result["cost_per_solve_usd"] == 10
+    assert result["prompt_tokens_per_solve"] == 1000
+
+
+@pytest.mark.parametrize("failure", [usage_cell(False, None, None),
+                                     usage_cell(False, 1, unknown=1)])
+def test_incomplete_usage_is_not_a_cheap_solve(failure):
+    result = summarize([usage_cell(True, 1), failure])["roles"]
+    assert result["cost_per_solve_usd"] is None
+    assert result["prompt_tokens_per_solve"] is None
+
+
+def test_no_solutions_has_no_per_solve_cost():
+    result = summarize([usage_cell(False, 3)])["roles"]
+    assert result["cost_per_solve_usd"] is None
+    assert result["prompt_tokens_per_solve"] is None
+
+
 def test_a_checker_that_accepts_anything_is_caught(tmp_path):
     task = make_task(tmp_path / "task", ALWAYS_PASSES)
     entry = validate_task(task, tmp_path / "validation")

@@ -5,6 +5,7 @@ import hashlib
 from uuid import uuid4
 
 from .provider import ProviderError
+from .constraints import check_write
 from .workspace import CHECKABLE_SUFFIXES, MAX_FILE_BYTES, MAX_FILES, MAX_TOTAL_BYTES, Workspace, tool_schema
 
 
@@ -13,8 +14,8 @@ def digest(content):
 
 
 class OwnedWorkspace(Workspace):
-    def __init__(self, root, owned_files):
-        super().__init__(root)
+    def __init__(self, root, owned_files, constraints=None):
+        super().__init__(root, constraints=constraints)
         self.owned_files = {self.path(name).relative_to(self.root).as_posix().casefold() for name in owned_files}
 
     def call(self, name, args, role):
@@ -93,6 +94,7 @@ class Delegation:
             for name in owned:
                 path = self.workspace.path(name)
                 relative = path.relative_to(self.workspace.root).as_posix()
+                check_write(self.workspace.constraints, relative)
                 key = relative.casefold()
                 if path.name.lower() == "agents.md" or path.is_dir():
                     raise ValueError("Subagent ownership must name project files, not guidance files or directories.")
@@ -116,7 +118,7 @@ class Delegation:
         for plan in plans:
             worker_id = uuid4().hex
             root = self.runtime.settings.workspace_root / ".workers" / self.value["id"] / worker_id
-            workspace = OwnedWorkspace(root, plan["owned_files"])
+            workspace = OwnedWorkspace(root, plan["owned_files"], self.workspace.constraints)
             for path, content in snapshot.items():
                 target = workspace.path(path)
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -194,6 +196,7 @@ class Delegation:
         current = {path: self.workspace.path(path).read_bytes() for path in self.workspace.files()}
         before = {}
         for path in changes:
+            check_write(self.workspace.constraints, path)
             target = self.workspace.path(path)
             before[path] = target.read_bytes() if target.exists() else None
             if digest(before[path]) != candidate["baseline"].get(path.casefold()):

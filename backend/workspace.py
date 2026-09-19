@@ -10,6 +10,8 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from datetime import datetime, timezone
+from .constraints import check_write, normalize_constraints
 
 MAX_FILE_BYTES = 128_000
 MAX_FILES = 200
@@ -27,7 +29,7 @@ CHECK_VERSION = "static-parser-1"
 
 # Only successful calls to these carry a result the agent can compare with the last
 # one; a write or a failure is judged by its arguments alone.
-READ_ONLY_TOOLS = {"list_files", "read_file", "search_files", "file_outline"}
+READ_ONLY_TOOLS = {"list_files", "read_file", "search_files", "file_outline", "validate_file"}
 
 _JS_PATTERNS = (
     (re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)"), "function"),
@@ -120,7 +122,7 @@ class Workspace:
     local, single-user boundary, not an OS sandbox against concurrent hostile
     processes that can replace directories between checks and operations.
     """
-    def __init__(self, root: Path, checks=None):
+    def __init__(self, root: Path, checks=None, constraints=None):
         root = root.absolute()
         self._check_components(root)
         root.mkdir(parents=True, exist_ok=True)
@@ -128,6 +130,7 @@ class Workspace:
         # Recorded static checks, keyed by path. The caller owns the dict so the
         # record survives across the nodes that make up one task.
         self.checks = checks if isinstance(checks, dict) else {}
+        self.constraints = normalize_constraints(constraints)
 
     @staticmethod
     def _check_components(path):
@@ -252,6 +255,7 @@ class Workspace:
             target = self.path(args["path"])
             if target.name.lower() == "agents.md":
                 raise ValueError("AGENTS.md is project guidance owned by the user and runtime, not the Coder.")
+            check_write(self.constraints, target.relative_to(self.root).as_posix())
             content = args["content"]
             if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_FILE_BYTES:
                 raise ValueError("File exceeds write limit.")
@@ -278,11 +282,14 @@ class Workspace:
             content = target.read_text(encoding="utf-8")
             digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
             recorded = self.checks.get(args["path"])
-            if (isinstance(recorded, dict) and recorded.get("valid") is True
-                    and recorded.get("sha256") == digest and recorded.get("version") == CHECK_VERSION):
+            if (not args.get("fresh", False) and isinstance(recorded, dict) and recorded.get("valid") is True
+                    and recorded.get("sha256") == digest and recorded.get("version") == CHECK_VERSION
+                    and recorded.get("parsed_at")):
                 # Same bytes, same parser: the answer cannot differ, and saying it was
                 # reused keeps the record honest.
                 return {"path": args["path"], "valid": True, "cache": "reused",
+                        "sha256": digest, "version": CHECK_VERSION,
+                        "parsed_at": recorded.get("parsed_at"),
                         "check": recorded.get("check"),
                         "note": "Unchanged since an earlier check in this task; not parsed again."}
             suffix = target.suffix.lower()
@@ -316,9 +323,11 @@ class Workspace:
             else:
                 raise ValueError(
                     "Safe validation supports .py, .json, .js, .mjs, .cjs, .html and .htm.")
-            self.checks[args["path"]] = {"sha256": digest, "version": CHECK_VERSION,
+            parsed_at = datetime.now(timezone.utc).isoformat()
+            self.checks[args["path"]] = {"sha256": digest, "version": CHECK_VERSION, "parsed_at": parsed_at,
                                          "valid": True, "check": check}
-            return {"path": args["path"], "valid": True, "check": check, "cache": "parsed"}
+            return {"path": args["path"], "valid": True, "check": check, "cache": "parsed",
+                    "sha256": digest, "version": CHECK_VERSION, "parsed_at": parsed_at}
         raise ValueError("Unknown tool.")
 
     @staticmethod

@@ -22,6 +22,7 @@ def prepare_continuation(settings, store, task, model, per_agent, instructions, 
     value = store.create(task, model, per_agent, persist=False,
                          project=project or source.get("project"))
     value["project_instructions"] = instructions
+    value["constraints"] = dict(source.get("constraints") or {})
     value["workspace"] = str((settings.workspace_root / value["id"]).absolute())
     value["files"] = []
     workspace = Workspace(settings.workspace_root / value["id"])

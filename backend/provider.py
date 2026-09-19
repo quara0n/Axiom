@@ -1,4 +1,7 @@
 import asyncio
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import math
 import random
 import time
 
@@ -26,7 +29,7 @@ class OpenRouter:
         # A reasoning model with an unbounded budget will think until it runs out of
         # budget instead of acting. Cap it, and drop the field for providers that
         # reject it rather than failing the task.
-        self.reasoning_supported = reasoning_max_tokens > 0
+        self.reasoning_unsupported_models = set()
         self.client = httpx.AsyncClient(
             base_url="https://openrouter.ai/api/v1",
             timeout=httpx.Timeout(request_timeout, connect=10),
@@ -48,22 +51,34 @@ class OpenRouter:
     async def _post(self, payload):
         response = await self.client.post("/chat/completions", json=payload)
         attempts = 1
-        if response.status_code == 400 and "reasoning" in payload:
+        if (response.status_code == 400 and "reasoning" in payload
+                and "reasoning" in response.text.lower()):
             # Some providers reject the reasoning field outright; retry without it.
-            self.reasoning_supported = False
+            self.reasoning_unsupported_models.add(payload["model"])
             response = await self.client.post("/chat/completions", json={
                 key: value for key, value in payload.items() if key != "reasoning"})
             attempts = 2
         return response, attempts
 
     async def complete(self, model, messages, tools):
+        return await self.complete_with_policy(model, messages, tools)
+
+    async def complete_with_policy(self, model, messages, tools, *, max_tokens=None,
+                                   reasoning_max_tokens=None):
+        """Per-call limits must not mutate a provider shared by concurrent agents."""
         started = time.perf_counter()
+        output_limit = min(self.max_tokens, max_tokens or self.max_tokens)
         payload = {
             "model": model, "messages": messages, "tools": tools,
-            "tool_choice": "auto", "max_tokens": self.max_tokens,
+            "tool_choice": "auto", "max_tokens": output_limit,
         }
-        if self.reasoning_supported:
-            payload["reasoning"] = {"max_tokens": self.reasoning_max_tokens}
+        if not tools:
+            payload.pop("tools")
+            payload.pop("tool_choice")
+        reasoning_limit = (self.reasoning_max_tokens if reasoning_max_tokens is None
+                           else reasoning_max_tokens)
+        if reasoning_limit > 0 and model not in self.reasoning_unsupported_models:
+            payload["reasoning"] = {"max_tokens": min(reasoning_limit, output_limit // 2)}
         attempts = 0
         try:
             for attempt in range(1, self.max_attempts + 1):
@@ -78,6 +93,8 @@ class OpenRouter:
                     await asyncio.sleep(self._backoff(attempt))
                     continue
                 attempts += posts
+                if model in self.reasoning_unsupported_models:
+                    payload.pop("reasoning", None)
                 if response.status_code in TRANSIENT_STATUSES and attempt < self.max_attempts:
                     await asyncio.sleep(self._backoff(attempt, response.headers.get("retry-after")))
                     continue
@@ -102,7 +119,7 @@ class OpenRouter:
             return message
         except ProviderError:
             raise
-        except (httpx.HTTPError, ValueError, KeyError, IndexError) as exc:
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
             raise ProviderError("OpenRouter request failed or returned an invalid response.") from exc
 
     def _backoff(self, attempt, retry_after=None):
@@ -111,9 +128,16 @@ class OpenRouter:
         try:
             hint = float(retry_after)
         except (TypeError, ValueError):
-            hint = None
-        if hint is not None and hint > 0:
-            delay = min(hint, MAX_BACKOFF_SECONDS)
+            try:
+                hint = (parsedate_to_datetime(retry_after) - datetime.now(timezone.utc)).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                hint = None
+        if hint is not None and math.isfinite(hint) and hint > 0:
+            # Never jitter below the provider's minimum. If its requested wait is
+            # outside our bounded retry policy, stop instead of retrying too soon.
+            if hint > MAX_BACKOFF_SECONDS:
+                raise ProviderError("Provider Retry-After exceeds the bounded retry window. Resume later.")
+            return hint
         return delay * (0.5 + random.random() / 2)
 
     async def models(self):

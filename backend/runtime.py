@@ -3,15 +3,18 @@ import hashlib
 import json
 import re
 import shutil
+import time
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
 from .provider import ProviderError
-from .coordination import DEFAULT_PROJECT_INSTRUCTIONS, compact_messages, handoff_text
+from .coordination import DEFAULT_PROJECT_INSTRUCTIONS, compact_messages, handoff_text, report_tool, read_team_report
+from .control import RepeatGuard, complete_with_limits, trace_tool, route_tools
 from .continuation import prepare_continuation
 from .delegation import DELEGATION_NAMES, Delegation, delegation_tools
-from .mcp import split_tool_name
+from .mcp import McpError
+from .constraints import check_files
 from . import runner
 from .store import ROLES, TERMINAL, now
 from .workspace import CHECKABLE_SUFFIXES, READ_ONLY_TOOLS, Workspace, tools_for
@@ -36,10 +39,7 @@ and evidence; a report that restates file contents can be cut off by the output 
 # Rounds that change the project, not rounds that inspect it. Reading eighteen files of
 # inherited code is diligence, not a runaway loop; the task-wide model-call budget is
 # what bounds inspection.
-WORK_TOOLS = {"write_file", "edit_file", "delegate_tasks", "inspect_worker", "integrate_worker"}
-
-# Reading many different files is diligence; reading the same one five times is a loop.
-MAX_REPEATED_CALLS = 4
+WORK_TOOLS = {"write_file", "edit_file", "delegate_tasks", "integrate_worker"}
 
 # The ledger is operator-facing evidence. It is never sent to an agent, because
 # spending tokens to report tokens would defeat its purpose. The stored call list is
@@ -174,6 +174,7 @@ class Runtime:
         # An MCP server is optional: without one the Coder simply has its own tools.
         self.mcp = mcp
         self.jobs = {}
+        self.deadlines = {}
         self.semaphore = asyncio.Semaphore(2)
         # Bound how many isolated subagents run at once across every task.
         self.worker_semaphore = asyncio.Semaphore(max(1, self.settings.max_workers))
@@ -250,7 +251,7 @@ class Runtime:
         message = message if isinstance(message, dict) else None
         numbers = usage_numbers(message)
         entry = {
-            "role": role, "agent": label, "call": len(ledger["calls"]) + 1,
+            "role": role, "agent": label, "call": ledger["totals"].get("calls", 0) + 1,
             "repair_round": value.get("repair_round", 0), "model": model,
             "resolved_model": (message or {}).get("resolved_model"),
             "generation_id": (message or {}).get("generation_id"),
@@ -259,6 +260,7 @@ class Runtime:
             "finish_reason": (message or {}).get("finish_reason"),
             "tool_calls": len((message or {}).get("tool_calls") or []),
             "error": error,
+            "requested_limits": (message or {}).get("requested_limits"),
             **numbers,
         }
         ledger["calls"].append(entry)
@@ -278,8 +280,10 @@ class Runtime:
         try:
             async with self.semaphore:
                 async with asyncio.timeout(self.settings.task_timeout):
+                    # Monotonic timestamps are process-local; never persist/replay them.
+                    self.deadlines[value["id"]] = time.monotonic() + self.settings.task_timeout
                     workspace = Workspace(self.settings.workspace_root / value["id"],
-                                          value.setdefault("checks", {}))
+                                          value.setdefault("checks", {}), value.get("constraints"))
                     instructions = DEFAULT_PROJECT_INSTRUCTIONS
                     if value.get("project_instructions"):
                         instructions += "\n## User project instructions\n" + value["project_instructions"]
@@ -313,6 +317,7 @@ class Runtime:
             self.terminate(value, "failed", "Task failed. Check backend logs and workspace configuration.")
             # Do not log user files, provider bodies or credentials.
         finally:
+            self.deadlines.pop(value["id"], None)
             # Subagent proposals are scratch copies; the durable record stays in SQLite.
             self.cleanup_workers(value["id"])
 
@@ -341,13 +346,19 @@ class Runtime:
         builder.add_edge(START, "Planner")
         builder.add_edge("Planner", "Coder")
         builder.add_edge("Coder", "validate")
-        builder.add_edge("validate", "execute")
+        builder.add_conditional_edges("validate", self.route_after_validation,
+                                      {"execute": "execute", "inspect": "Tester"})
         builder.add_edge("execute", "Tester")
         builder.add_edge("Tester", "Reviewer")
         builder.add_edge("Reviewer", "finalize")
         builder.add_conditional_edges("finalize", self.route_after_review,
                                       {"repair": "Coder", "end": END})
         return builder.compile()
+
+    @staticmethod
+    def route_after_validation(state):
+        # Do not launch generated programs already known to fail static checks.
+        return "inspect" if state["value"].get("validation_errors") else "execute"
 
     @staticmethod
     def route_after_review(state: WorkflowState):
@@ -357,7 +368,7 @@ class Runtime:
         async def execute(state: WorkflowState):
             value = state["value"]
             workspace = Workspace(self.settings.workspace_root / value["id"],
-                                  value.setdefault("checks", {}))
+                                  value.setdefault("checks", {}), value.get("constraints"))
             agent = next(agent for agent in value["agents"] if agent["name"] == role)
             agent["status"] = "running"
             agent["attempt"] = agent.get("attempt", 0) + 1
@@ -372,12 +383,12 @@ class Runtime:
     async def validate(self, state: WorkflowState):
         value = state["value"]
         workspace = Workspace(self.settings.workspace_root / value["id"],
-                              value.setdefault("checks", {}))
+                              value.setdefault("checks", {}), value.get("constraints"))
         checks, validation_errors, unsupported = [], [], []
         for filename in workspace.files():
             if filename.lower().endswith(CHECKABLE_SUFFIXES):
                 try:
-                    result = await asyncio.to_thread(workspace.call, "validate_file", {"path": filename}, "Tester")
+                    result = await asyncio.to_thread(workspace.call, "validate_file", {"path": filename, "fresh": True}, "Tester")
                     checks.append(result)
                 except (ValueError, OSError, SyntaxError) as exc:
                     validation_errors.append(filename)
@@ -385,10 +396,15 @@ class Runtime:
                                    "message": workspace.error_message(exc)})
             elif filename != "AGENTS.md":
                 unsupported.append(filename)
+        scope_failures = check_files(workspace.constraints, workspace.files())
+        validation_errors.extend(name for name in scope_failures if name not in validation_errors)
         value["validation_errors"] = validation_errors
         value["verification"] = {"mode": "static_only", "runtime_tested": False,
                                  "visually_tested": False, "checks": checks,
-                                 "unsupported_files": unsupported}
+                                 "unsupported_files": unsupported,
+                                 "constraint_violations": scope_failures,
+                                 "execution": {"state": "not_run", "checks": [],
+                                               "reason": "Awaiting execution; static failures block launch."}}
         self.event(value, "System", f"Static checks: {len(checks)} files, {len(validation_errors)} failures. Runtime and visuals unverified.")
         return {"value": value}
 
@@ -401,13 +417,24 @@ class Runtime:
         """
         value = state["value"]
         workspace = Workspace(self.settings.workspace_root / value["id"],
-                              value.setdefault("checks", {}))
+                              value.setdefault("checks", {}), value.get("constraints"))
         try:
+            if workspace.constraints:
+                # A local child process can write beyond the confined tool policy.
+                # Do not present exact file constraints as enforced during execution.
+                value["verification"]["execution"] = {
+                    "state": "not_run", "checks": [], "reason":
+                    "Task file constraints require confined tools; local execution cannot enforce them."}
+                return {"value": value}
             outcome = await asyncio.to_thread(runner.execution_outcome, workspace, self.settings)
         except (ValueError, OSError) as exc:
             outcome = {"state": "not_run", "checks": [], "reason": workspace.error_message(exc)}
+        if outcome.get("changed_project"):
+            # Executed code may have rewritten a source file after it was parsed.
+            await self.validate(state)
         value["verification"]["execution"] = outcome
-        value["verification"]["runtime_tested"] = outcome["state"] == "passed"
+        value["verification"]["runtime_tested"] = (
+            outcome["state"] == "passed" and outcome.get("intent") == "tests")
         if outcome["state"] == "not_run":
             value["verification"]["mode"] = "static_only"
             self.event(value, "System", "Nothing was executed: " + outcome["reason"])
@@ -424,7 +451,7 @@ class Runtime:
     async def finalize(self, state: WorkflowState):
         value, previous = state["value"], state["previous"]
         workspace = Workspace(self.settings.workspace_root / value["id"],
-                              value.setdefault("checks", {}))
+                              value.setdefault("checks", {}), value.get("constraints"))
         value["summary"] = previous["Reviewer"]
         value["round_history"].append({"round": value["repair_round"],
                                        "reports": dict(previous),
@@ -437,7 +464,8 @@ class Runtime:
         fingerprint = digest.hexdigest()
         stalled = fingerprint == value.get("last_review_fingerprint")
         value["last_review_fingerprint"] = fingerprint
-        if value["validation_errors"] or value.get("review_verdict") != "approved":
+        execution_failed = value["verification"].get("execution", {}).get("state") == "failed"
+        if value["validation_errors"] or execution_failed or value.get("review_verdict") != "approved":
             if value["repair_round"] < self.settings.max_repair_rounds and not stalled:
                 value["repair_round"] += 1
                 # The Tester's findings and the verification record already reach the
@@ -457,7 +485,7 @@ class Runtime:
                 return {"value": value}
             value["status"] = "failed"
             value["error"] = ("Repair stopped because project files did not change. Read the reports."
-                              if stalled else "Review requested changes or static validation failed; repair budget exhausted. Read the reports.")
+                              if stalled else "Review requested changes or verification failed; repair budget exhausted. Read the reports.")
             self.event(value, "System", value["error"])
         else:
             value["status"] = "completed"
@@ -475,22 +503,35 @@ class Runtime:
         # Only the Coder reaches an outside tool server, and only the lead Coder:
         # a subagent writing into an isolated copy has no business driving Blender.
         mcp_tools = []
-        if role == "Coder" and worker is None and self.mcp is not None:
+        if role == "Coder" and worker is None and self.mcp is not None and not workspace.constraints:
             if self.mcp.available():
-                mcp_tools = self.mcp.tools()
+                mcp_tools = await asyncio.to_thread(self.mcp.tools)
+        mcp_names = {tool["function"]["name"] for tool in mcp_tools}
         tools = tools + mcp_tools
         # During repairs, old downstream reports are feedback, not fresh evidence.
         visible_previous = previous if role == "Coder" else {
             name: previous[name] for name in ROLES[:ROLES.index(role)] if name in previous
         }
+        available_reports = dict(visible_previous)
+        # Retrieve only from the explicit continuation parent, never an arbitrary
+        # task ID selected by the model. Historical reports are labelled as such.
+        if value.get("continue_from"):
+            parent = self.store.get(value["continue_from"])
+            if parent:
+                available_reports.update({"Previous/" + agent["name"]: agent["result"]
+                                          for agent in parent.get("agents", []) if agent.get("result")})
+        if available_reports:
+            tools.append(report_tool())
         context = {
             "task": value["task"],
-            "prior_results": {name: handoff_text(text) for name, text in visible_previous.items()},
+            "constraints": workspace.constraints,
+            "prior_results": {name: handoff_text(text, recipient=role) for name, text in visible_previous.items()},
             "project_instructions": value.get("instructions_snapshot", ""),
             "repair_round": value.get("repair_round", 0),
             "repair_feedback": value.get("repair_feedback"),
             "verification": value.get("verification"),
             "continuation": value.get("continuation"),
+            "available_reports": list(available_reports),
         }
         if worker is not None:
             context["subagent"] = {
@@ -505,14 +546,25 @@ class Runtime:
         successful_tools = set()
         nudges = {"empty": 0, "evidence": 0, "truncated": 0, "verdict": 0}
         work_rounds = 0
-        repeats = {}
+        guard = RepeatGuard()
+        recovery = False
+        deadline_warned = False
         while work_rounds <= self.settings.max_tool_rounds:
             if value.get("model_calls", 0) >= self.settings.max_model_calls:
                 raise ProviderError("Task exceeded its total model-call budget.")
             value["model_calls"] = value.get("model_calls", 0) + 1
-            compact_messages(messages)
+            if compact_messages(messages):
+                guard.reads.clear()
+            remaining = self.deadlines.get(value["id"], float("inf")) - time.monotonic()
+            if not deadline_warned and remaining < min(120, self.settings.task_timeout * 0.2):
+                deadline_warned = True
+                messages.append({"role": "user", "content": (
+                    "The task is nearing its time limit. Finish the current necessary change, "
+                    "then return a concise handoff with unresolved blockers. Do not start new scope.")})
             try:
-                message = await self.provider.complete(model, messages, tools)
+                turn_tools = route_tools(tools, delegation, value, self.settings)
+                message = await complete_with_limits(self.provider, self.settings, model, messages,
+                                                     turn_tools, role, recovery)
             except ProviderError as exc:
                 # A failed or retried call is part of what the run cost.
                 self.record_usage(value, role, label, model, error=type(exc).__name__)
@@ -531,12 +583,17 @@ class Runtime:
                 assistant["tool_calls"] = calls
             messages.append(assistant)
             if not calls:
+                # A partial report is not a completed plan/review. Empty reasoning
+                # blowouts and visible truncated reports use one cheaper recovery.
+                if message.get("finish_reason") == "length" and content and content.strip():
+                    content = None
                 if not content or not content.strip():
                     if message.get("finish_reason") == "length":
                         # A reasoning model that runs out of budget mid-thought can be pulled
                         # back once by forbidding any more deliberation. A second cut-off is a
                         # configuration problem, and then we say exactly that.
                         nudges["truncated"] += 1
+                        recovery = True
                         if nudges["truncated"] > 1:
                             raise ProviderError(
                                 f"{role} was cut off at the output limit ({self.settings.max_tokens} "
@@ -561,6 +618,7 @@ class Runtime:
                         "Your last message was empty. Continue the task: use the workspace tools to "
                         "obtain evidence, and write the required files with write_file.")})
                     continue
+                nudges["empty"] = 0
                 # A Lead Coder may implement the work itself or integrate a proposal.
                 produced = {"write_file", "edit_file", "integrate_worker"} & successful_tools
                 if not successful_tools or (role == "Coder" and not produced):
@@ -589,20 +647,26 @@ class Runtime:
                             '"your full readable report"} and nothing else.' )})
                         continue
                     value["review_verdict"] = report["verdict"]
-                    return report["summary"][:24000]
-                return content[:24000]
+                    return report["summary"]
+                return content
+            nudges["empty"] = 0
+            recovery = False
             for call in calls:
                 call_id = call.get("id") if isinstance(call, dict) else None
                 if not isinstance(call_id, str):
                     raise ProviderError("OpenRouter returned an invalid tool call ID.")
                 name, args = None, {}
+                started, result, outcome = time.perf_counter(), None, "failed"
+                observed = False
                 try:
                     function = call["function"]
                     name = function["name"]
+                    if not isinstance(name, str):
+                        name = None
+                        raise ValueError("Tool name must be a string.")
                     # An outside tool server makes things too, so its calls are bounded
                     # by the same work-round budget as a write.
-                    mcp_server, mcp_tool = split_tool_name(name)
-                    is_mcp = bool(mcp_server and self.mcp is not None and self.mcp.available())
+                    is_mcp = name in mcp_names
                     if name in WORK_TOOLS or is_mcp:
                         if work_rounds >= self.settings.max_tool_rounds:
                             raise ProviderError(
@@ -616,52 +680,42 @@ class Runtime:
                     args = json.loads(arguments)
                     if not isinstance(args, dict):
                         raise ValueError("Tool arguments must be an object.")
-                    signature = f"{name} {args.get('path') or args.get('query') or ''}".strip()
-                    # Different edits and worker IDs are distinct operations even
-                    # when they target the same file or use the same tool.
-                    argument_digest = hashlib.sha256(
-                        json.dumps(args, sort_keys=True).encode()).hexdigest()
-                    # A write is judged before it runs: identical arguments are the same
-                    # operation however many times it is attempted.
-                    if name not in READ_ONLY_TOOLS:
-                        repeat_key = (name, argument_digest)
-                        repeats[repeat_key] = repeats.get(repeat_key, 0) + 1
-                        if repeats[repeat_key] > MAX_REPEATED_CALLS:
-                            raise ProviderError(
-                                f"{role} repeated {signature} without reaching a conclusion. "
-                                "Report what you have found so far, or say what is blocking you.")
+                    if name not in {tool["function"]["name"] for tool in turn_tools}:
+                        observed = True
+                        guard.observe(name, args)
+                        raise ValueError("This tool is not available to this role.")
+                    readonly = name in READ_ONLY_TOOLS | {"read_team_report", "inspect_worker"}
+                    warning = False
+                    if not readonly:
+                        observed = True
+                        warning = guard.observe(name, args)
                     if delegation is not None and name in DELEGATION_NAMES:
                         result = await delegation.call(name, args, previous)
+                    elif name == "read_team_report":
+                        result = read_team_report(available_reports, args)
                     elif name == "validate_file":
                         result = await asyncio.to_thread(workspace.call, name, args, role)
                     elif is_mcp:
-                        outcome = await asyncio.to_thread(self.mcp.call, name, args)
+                        mcp_result = await asyncio.to_thread(self.mcp.call, name, args)
                         value["mcp_calls"] = (value.get("mcp_calls") or [])[-49:] + [
-                            {"tool": name, "role": role, "ok": not outcome["is_error"]}]
-                        result = {"tool": name, "output": outcome["text"],
-                                  "truncated": outcome["truncated"]}
-                        if outcome["is_error"]:
+                            {"tool": name, "role": role, "ok": not mcp_result["is_error"]}]
+                        result = {"tool": name, "output": mcp_result["text"],
+                                  "truncated": mcp_result["truncated"]}
+                        if mcp_result["is_error"]:
                             result["error"] = "The tool server reported a failure."
                     else:
                         result = workspace.call(name, args, role)
-                    if name in READ_ONLY_TOOLS:
-                        # A read that returns new bytes is progress, and one that returns
-                        # the same bytes is a loop. Judging it after the call is what
-                        # tells the two apart, and it is what stopped a Coder that was
-                        # re-reading a file it kept changing.
-                        failed = isinstance(result, dict) and "error" in result
-                        material = argument_digest if failed else hashlib.sha256(
-                            (argument_digest + json.dumps(result, sort_keys=True,
-                                                          ensure_ascii=False)).encode()).hexdigest()
-                        repeat_key = (name, material)
-                        repeats[repeat_key] = repeats.get(repeat_key, 0) + 1
-                        if repeats[repeat_key] > MAX_REPEATED_CALLS:
-                            raise ProviderError(
-                                f"{role} repeated {signature} without reaching a conclusion: the call "
-                                f"returned the same result {repeats[repeat_key]} times and the project "
-                                "did not change. Change what you are doing, or report what is "
-                                "blocking you.")
-                    successful_tools.add(name)
+                    if readonly:
+                        observed = True
+                        warning = guard.observe(name, args, result, read=True)
+                    if warning:
+                        result = {**result, "loop_warning": "This call has returned no new progress four times. "
+                                  "Use this evidence to finish, or change your approach."}
+                    if name != "read_team_report" and not result.get("error"):
+                        successful_tools.add(name)
+                    if ((name in {"write_file", "edit_file"} and result.get("diff") != "No textual change.")
+                            or (name == "integrate_worker" and result.get("applied"))):
+                        guard.reads.clear()
                     # A subagent writes in its own copy; the task's file list must keep
                     # describing the integrated workspace.
                     # A Blender export lands in the workspace like any other artifact,
@@ -669,14 +723,27 @@ class Runtime:
                     if (name in {"write_file", "edit_file"} or is_mcp) and worker is None:
                         value["files"] = workspace.files()
                     self.event(value, label, f"Tool {name}: {args.get('path', 'workspace')}")
-                except (ValueError, KeyError, TypeError, OSError, SyntaxError) as exc:
+                    outcome = "failed" if result.get("error") else "completed"
+                except (ValueError, KeyError, TypeError, OSError, SyntaxError, McpError) as exc:
                     # Avoid leaking absolute paths from OS errors.
                     value["tool_failures"] = value.get("tool_failures", 0) + 1
-                    result = {"error": type(exc).__name__, "message": workspace.error_message(exc)}
+                    result = {"error": type(exc).__name__, "message": (
+                        "The MCP server failed or timed out. Its effect is unknown; inspect before retrying."
+                        if isinstance(exc, McpError) else workspace.error_message(exc))}
+                    if not observed and name in READ_ONLY_TOOLS | {"read_team_report"}:
+                        # Missing files and failed searches must also be bounded.
+                        try:
+                            guard.observe(name, args, {"error": type(exc).__name__}, read=True)
+                        except ValueError:
+                            result["message"] = "This read keeps failing. Change the arguments or report the blocker."
                     # Name what was refused: a bare "rejected" line tells the reader nothing.
                     path = args.get("path") if isinstance(args, dict) else None
                     detail = " ".join(part for part in (name, path) if isinstance(part, str) and part)
                     self.event(value, label, f"Tool call rejected: {detail or 'invalid call'} ({type(exc).__name__}).")
+                finally:
+                    trace_tool(value, label, call_id, name, args if isinstance(args, dict) else {},
+                               started, result, outcome)
+                    self.store.save(value)
                 messages.append({"role": "tool", "tool_call_id": call_id,
                                  "content": json.dumps(result, ensure_ascii=False)})
         raise ProviderError(

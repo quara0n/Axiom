@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from dotenv import set_key
 
 from .config import Settings
+from .constraints import normalize_constraints
 from .continuation import prepare_continuation
 from .mcp import McpError, McpHub, parse_servers
 from .preview import Preview
@@ -34,6 +35,7 @@ class TaskRequest(BaseModel):
     project_instructions: str = Field(default="", max_length=16000)
     project: str | None = Field(default=None, max_length=60)
     continue_from: str | None = Field(default=None, max_length=64)
+    constraints: dict | None = None
 
 
 class ConnectionRequest(BaseModel):
@@ -178,6 +180,11 @@ def create_app(settings=None, provider=None):
                 per_agent = dict(source.get("models") or {})
         instructions = body.project_instructions.strip() or (source or {}).get("project_instructions", "")
         project = body.project or (source.get("project") if source else None)
+        try:
+            constraints = normalize_constraints(body.constraints if body.constraints is not None
+                                                else (source or {}).get("constraints"))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
         if source:
             try:
                 value = prepare_continuation(settings, request.app.state.store, task, model,
@@ -197,6 +204,7 @@ def create_app(settings=None, provider=None):
         # against the budget this run actually has rather than a number of its own.
         value["limits"] = {"tool_rounds": settings.max_tool_rounds,
                            "model_calls": settings.max_model_calls}
+        value["constraints"] = constraints
         request.app.state.store.save(value)
         runtime.start(value)
         return value
@@ -285,12 +293,22 @@ def create_app(settings=None, provider=None):
         if not settings.allow_execution:
             raise HTTPException(409, "Running a project's own checks is off. Set "
                                      "AXIOM_ALLOW_EXECUTION=1 and restart the backend.")
+        if value["status"] not in CONTINUABLE:
+            raise HTTPException(409, "Wait for the task to finish before executing its checks.")
+        if value.get("constraints"):
+            raise HTTPException(409, "Local execution cannot enforce this task's file constraints.")
         workspace = Workspace(settings.workspace_root / value["id"],
                               value.setdefault("checks", {}))
         outcome = await asyncio.to_thread(runner.execution_outcome, workspace, settings)
+        if outcome.get("changed_project"):
+            await request.app.state.runtime.validate({"value": value, "previous": {}})
         verification = value.setdefault("verification", {})
         verification["execution"] = outcome
-        verification["runtime_tested"] = outcome["state"] == "passed"
+        verification["runtime_tested"] = outcome["state"] == "passed" and outcome.get("intent") == "tests"
+        if outcome["state"] == "failed" or value.get("validation_errors"):
+            if value["status"] == "completed":
+                value["status"] = "failed"
+                value["error"] = "A subsequent verification failed. Continue this task to repair it."
         if outcome["state"] != "not_run":
             verification["mode"] = "static_and_executed"
         request.app.state.store.save(value)

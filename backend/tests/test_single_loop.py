@@ -118,7 +118,9 @@ def test_the_single_loop_stops_a_repeated_identical_write(tmp_path):
     provider = Scripted([call("write_file", {"path": "main.py", "content": "print(1)\n"})])
     with pytest.raises(ProviderError, match="repeated"):
         run(tmp_path, provider)
-    assert provider.calls == 5
+    # Four executions, then two refused calls with corrective feedback. The
+    # seventh call terminates; recovery never replays the rejected mutations.
+    assert provider.calls == 7
 
 
 def test_the_single_loop_shares_the_task_model_call_budget(tmp_path):

@@ -543,3 +543,39 @@ task selection.
 
 There are more than two views; at that point this becomes a router rather than a pair
 of anchors.
+
+---
+
+### ADR-014 — Evidence and capabilities are enforced independently of model opinion
+
+**Status:** Active
+
+**Context:** A Reviewer could approve a task whose declared check exited nonzero.
+MCP schemas were only shown to Lead Coder, but dispatch accepted forged MCP calls
+from other roles. Long reports lost their tail, and repeat detection terminated
+before the agent had received corrective feedback.
+
+**Decision:** Keep LangGraph and the existing role ownership. Execution failures
+are deterministic completion blockers; static failures skip execution and remain
+available to Tester/Reviewer. Parse the verification snapshot freshly and include
+hash/version/time provenance in cached parse results. Enforce the selected tool
+set at dispatch. Worker inspection is read-only and costs no mutation round.
+
+Use the shared loop controller for bounded corrective feedback and per-call
+output limits; do not change global provider settings during a request. Tool menus
+change at proposal/quota transitions, preserving stable file-tool schemas. Keep
+full completed reports and offer exact paginated access in addition to extractive
+handoffs. Historical reports never substitute for current execution evidence.
+
+Explicit API file contracts refine ADR-011 without banning manifests globally.
+They cover direct and delegated writes and final outputs. Local execution and MCP
+are disabled for constrained tasks because they bypass confined file tools. Text
+constraints remain advisory until represented explicitly; do not claim this patch
+implements a natural-language policy compiler or an OS sandbox.
+
+**Why:** These decisions have observable correctness conditions and can be tested
+offline. A probabilistic decision source such as JEV must not override them.
+
+**Limits:** No model-quality improvement is established by scripted tests. JEV is
+still a client/probe, not an active router. Live comparisons, safe executable
+isolation, browser evidence, durable replay and broader memory are future work.
