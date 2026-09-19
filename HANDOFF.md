@@ -74,6 +74,34 @@ requirements `supported` (0.90-0.94) that the Reviewer's hand analysis found rea
 defects in. That is why only a confident no counts, and why a JEV answer never outranks
 code. Details and sources: `docs/research/2026-09-19-jev-system-one-in-axiom.md`.
 
+The evidence pass was then tightened, because its first version could turn its own blind
+spots into defects. It now separates three things: the model's raw answer, the evidence
+the answer rests on, and the claim we are willing to make. A requirement about behaviour
+- controls, collisions, visibility, sound - is `insufficient_evidence` however confident
+the answer, because reading source cannot establish behaviour in either direction. A
+requirement readable from source is `contradicted` only when the evidence was complete;
+with a file omitted or truncated, a low answer stays `insufficient_evidence`. Values
+that are not probabilities (NaN, infinity, outside 0-1) are rejected outright, the
+truncation marker counts inside the state budget, and the truncations and omissions are
+disclosed to JEV in the request. The role prompt now calls a negative finding a
+hypothesis to investigate rather than a defect to disprove.
+
+Calls are bounded and recorded: one configurable wall-clock budget per pass covering
+retries and backoff, no client and no request for the hosted endpoint without a key
+(an explicitly configured local endpoint is still allowed without one), an identical
+basis reused by content fingerprint instead of re-asked, and a per-task ledger
+(`value["jev"]`) carrying purpose, model, latency, tokens, status and reuse across
+repair rounds. Cost is estimated from tokens and marked as estimated; an unpriced call
+is recorded as unknown, never as zero. `validate` runs again after a repair, so this is
+a pass per validation, not one call per task.
+
+Shadow mode (`AXIOM_JEV_SHADOW=1`, off by default) records what JEV would recommend
+next and never acts on it. It is triggered only by the existing repeat guard's
+no-progress signal - no second detector - offers only actions the current role and
+harness actually allow, is capped per task and time-limited, and stores each
+recommendation next to what the workflow actually did, so a "followed" rate can be
+measured later. It changes no permission, tool menu, role or verdict.
+
 Still unimplemented/unmeasured: JEV-driven routing and tool decisions, a calibration
 study on our own labelled tasks, live comparative quality and cost, live subagent
 quality, container isolation/process-tree cancellation, browser interaction checks,
@@ -82,8 +110,8 @@ memory. No frontend changes in this branch.
 
 ## Verification
 
-- Baseline: 170 passed. Updated: **218 passed**, 47 new regression cases (38 from the
-  harness patch, 9 for the JEV evidence pass); one
+- Baseline: 170 passed. Updated: **238 passed**, 68 new regression cases (38 from the
+  harness patch, 30 covering the JEV evidence assessment and shadow mode); one
   existing third-party Starlette deprecation warning.
 - `python -m pytest backend/tests -q` in the project environment. This session used
   `NO_PROXY=127.0.0.1,localhost,::1` for loopback tests behind the environment proxy.

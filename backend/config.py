@@ -34,6 +34,16 @@ class Settings:
     # states. Evidence only: it is recorded for the Tester and Reviewer, and it can
     # never approve a task or override a deterministic validation failure.
     jev_evidence: bool = True
+    # One wall-clock budget for a whole evidence pass, retries and the waits between
+    # them included: a slow decision must never hold a finished task open.
+    jev_time_budget: float = 5.0
+    # Shadow mode records what JEV would recommend next and never acts on it.
+    jev_shadow: bool = False
+    jev_shadow_max: int = 3
+    jev_shadow_timeout: float = 3.0
+    # Used to turn a reported token count into an estimated cost. The API reports
+    # tokens, not money, and an unpriced call is recorded as unknown, never as zero.
+    jev_input_price_per_mtok: float = 0.042
     # Running generated code is a real boundary decision, so it is off until the
     # operator turns it on. Discovery of declared checks is always on.
     allow_execution: bool = False
@@ -99,6 +109,12 @@ class Settings:
             jev_max_attempts=max(1, min(int(os.getenv("AXIOM_JEV_MAX_ATTEMPTS", "3")), 8)),
             jev_evidence=os.getenv("AXIOM_JEV_EVIDENCE", "1").strip().lower()
             in {"1", "true", "yes", "on"},
+            jev_time_budget=max(0.5, min(float(os.getenv("AXIOM_JEV_TIME_BUDGET", "5")), 120)),
+            jev_shadow=os.getenv("AXIOM_JEV_SHADOW", "").strip().lower()
+            in {"1", "true", "yes", "on"},
+            jev_shadow_max=max(1, min(int(os.getenv("AXIOM_JEV_SHADOW_MAX", "3")), 20)),
+            jev_shadow_timeout=max(0.5, min(float(os.getenv("AXIOM_JEV_SHADOW_TIMEOUT", "3")), 60)),
+            jev_input_price_per_mtok=max(0.0, float(os.getenv("AXIOM_JEV_INPUT_PRICE_PER_MTOK", "0.042"))),
             allow_execution=os.getenv("AXIOM_ALLOW_EXECUTION", "").strip().lower()
             in {"1", "true", "yes", "on"},
             execution_timeout=max(5, min(float(os.getenv("AXIOM_EXECUTION_TIMEOUT", "120")), 1800)),

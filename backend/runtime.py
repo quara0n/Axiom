@@ -12,6 +12,7 @@ from .provider import ProviderError
 from .coordination import DEFAULT_PROJECT_INSTRUCTIONS, compact_messages, handoff_text, report_tool, read_team_report
 from .control import RepeatGuard, complete_with_limits, trace_tool, route_tools
 from .jev_evidence import collect as collect_jev_evidence
+from .jev_shadow import assess as assess_next_action, classify_next, note_next_action
 from .continuation import prepare_continuation
 from .delegation import DELEGATION_NAMES, Delegation, delegation_tools
 from .mcp import McpError
@@ -37,9 +38,12 @@ code and its reports are already in your workspace: inspect them first and rebui
 only what is genuinely missing. Keep your final report focused on decisions, changes
 and evidence; a report that restates file contents can be cut off by the output limit.
 The verification record may carry jev_evidence: typed judgements about the task's own
-stated requirements, each with a raw probability. Treat a requirement it marks as
-contradicted as a defect unless you can refute it from the files, and never read a
-probability near 0.5 as a finding either way."""
+stated requirements, each with a raw probability and a record of the evidence they rest
+on. Treat a requirement marked contradicted as a hypothesis to investigate against the
+files, not as a defect you must disprove, and never read a probability near 0.5 as a
+finding either way. A requirement marked insufficient_evidence could not be settled by
+reading source: behaviour such as controls, collisions, visibility or sound needs
+execution or sight. A JEV answer never overrides a failed deterministic check."""
 
 # Rounds that change the project, not rounds that inspect it. Reading eighteen files of
 # inherited code is diligence, not a runaway loop; the task-wide model-call budget is
@@ -414,16 +418,24 @@ class Runtime:
         # JEV reads the task's own stated requirements against the files the run wrote.
         # It is recorded as evidence for the Tester and Reviewer; it never decides the
         # outcome, and a failure to reach the model is recorded rather than raised.
-        evidence = await collect_jev_evidence(self.settings, value["id"], value["task"],
-                                              workspace.files())
+        # validate runs again after a repair and after an executed check changed files,
+        # so this is a pass per validation, not one call per task. An identical basis is
+        # reused inside the module instead of being asked twice.
+        remaining = self.deadlines.get(value["id"], float("inf")) - time.monotonic()
+        evidence = await collect_jev_evidence(self.settings, value, workspace.files(),
+                                              remaining_seconds=remaining)
         if evidence is not None:
             value["verification"]["jev_evidence"] = evidence
             if evidence.get("status") == "ran":
-                contradicted = sum(1 for item in evidence["findings"]
-                                   if item["verdict"] == "contradicted")
+                counts = {}
+                for item in evidence["findings"]:
+                    counts[item["verdict"]] = counts.get(item["verdict"], 0) + 1
+                summary = ", ".join(f"{count} {name}" for name, count in sorted(counts.items()))
+                suffix = ("reused an identical assessment" if evidence.get("reused")
+                          else f"model {evidence.get('model')}")
                 self.event(value, "System",
-                           f"JEV read {len(evidence['findings'])} stated requirements: "
-                           f"{contradicted} contradicted, model {evidence.get('model')}.")
+                           f"JEV assessed {len(evidence['findings'])} stated requirements: "
+                           f"{summary} ({suffix}).")
             elif evidence.get("reason"):
                 self.event(value, "System", f"JEV evidence {evidence['status']}: {evidence['reason']}")
         return {"value": value}
@@ -569,6 +581,9 @@ class Runtime:
         guard = RepeatGuard()
         recovery = False
         deadline_warned = False
+        # Set when the repeat guard reports a call that returned no new progress. It is
+        # the only trigger for a shadow recommendation: no second stagnation detector.
+        stagnation = False
         while work_rounds <= self.settings.max_tool_rounds:
             if value.get("model_calls", 0) >= self.settings.max_model_calls:
                 raise ProviderError("Task exceeded its total model-call budget.")
@@ -593,6 +608,11 @@ class Runtime:
             if not isinstance(message, dict):
                 raise ProviderError("OpenRouter returned an invalid assistant message.")
             calls = message.get("tool_calls") or []
+            # Attach what the workflow actually does next to the last shadow
+            # recommendation, so a recommendation and a followed one stay distinct.
+            names = [call["function"].get("name") for call in calls
+                     if isinstance(call, dict) and isinstance(call.get("function"), dict)]
+            note_next_action(value, classify_next(names, finished=not calls))
             content = message.get("content")
             if content is not None and not isinstance(content, str):
                 raise ProviderError("OpenRouter returned unsupported message content.")
@@ -729,6 +749,7 @@ class Runtime:
                         observed = True
                         warning = guard.observe(name, args, result, read=True)
                     if warning:
+                        stagnation = True
                         result = {**result, "loop_warning": "This call has returned no new progress four times. "
                                   "Use this evidence to finish, or change your approach."}
                     if name != "read_team_report" and not result.get("error"):
@@ -766,6 +787,17 @@ class Runtime:
                     self.store.save(value)
                 messages.append({"role": "tool", "tool_call_id": call_id,
                                  "content": json.dumps(result, ensure_ascii=False)})
+            if stagnation and self.settings.jev_shadow:
+                # Shadow mode: record what JEV would do next, and change nothing. It is
+                # triggered by the repeat guard's own signal, and it cannot route, skip a
+                # role, widen a permission or touch the verdict.
+                await assess_next_action(
+                    self.settings, value, role, repeated=True, rounds=work_rounds,
+                    remaining_seconds=(self.deadlines.get(value["id"], float("inf"))
+                                       - time.monotonic()),
+                    allows_execution=bool(self.settings.allow_execution),
+                    repair_round=value.get("repair_round", 0))
+                stagnation = False
         raise ProviderError(
             f"{role} exceeded its work round limit ({self.settings.max_tool_rounds}) after "
             "changing the project that many times. Raise AXIOM_MAX_TOOL_ROUNDS or split the task.")

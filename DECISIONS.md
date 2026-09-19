@@ -579,3 +579,36 @@ offline. A probabilistic decision source such as JEV must not override them.
 **Limits:** No model-quality improvement is established by scripted tests. JEV is
 still a client/probe, not an active router. Live comparisons, safe executable
 isolation, browser evidence, durable replay and broader memory are future work.
+
+### ADR-015 — A JEV answer is evidence, and the harness decides what it can establish
+
+JEV is a probabilistic decision source with no way to say "I was not shown that". Asked
+about a requirement whose evidence was never in the state, it still answers, and we
+measured it doing so at 0.03-0.3. Reading that as a defect turns our own missing file
+into the product's fault.
+
+So an assessment separates three things that are easy to conflate: the model's raw
+answer, the evidence the answer rests on (files sent, files omitted, files truncated,
+and whether anything was executed), and the claim the harness is willing to make.
+`insufficient_evidence` is a first-class outcome beside `supported` and `contradicted`.
+A requirement about behaviour - controls, collisions, visibility, sound - is never
+confirmed or refuted from source, however confident the answer. A requirement readable
+from source is `contradicted` only over complete evidence. Values that are not
+probabilities are rejected. The evidence budget includes the truncation marker, and the
+omissions are disclosed to JEV in the request rather than left implicit.
+
+A negative finding is a hypothesis for an agent to investigate, not a defect to
+disprove, and a JEV answer never overrides a failed deterministic check. Shadow mode,
+which records what JEV would recommend next without acting on it, exists so the
+recommendation can be measured before it is trusted: it is triggered by the existing
+repeat guard, offers only actions the role and harness already allow, and stores each
+recommendation beside what the workflow actually did.
+
+**Why:** It keeps the parts that are testable offline - classification, thresholds,
+budgets, reuse, cancellation and recording - separate from the part that is not:
+whether a judgement about a running artifact is any good.
+
+**Limits:** Thresholds are chosen from observed behaviour, not fitted on labelled tasks.
+Shadow mode is opt-in and unmeasured, the recommendation options are a first guess, and
+nothing here routes, skips a role, grants a capability or changes a verdict. Whether any
+of it reduces unnecessary calls or cost is still an open question.

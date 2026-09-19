@@ -37,6 +37,23 @@ class JevError(RuntimeError):
     pass
 
 
+HOSTED_HOST = "api.typesafe.ai"
+
+
+def is_hosted(base_url):
+    """Whether a base URL points at TypeSafe's hosted service.
+
+    The hosted service needs an API key, so the harness must not call it without one.
+    An explicitly configured local or self-hosted endpoint is left alone: those often
+    need no credentials at all, and refusing them would break that use.
+    """
+    try:
+        host = httpx.URL(base_url or "").host
+    except (TypeError, ValueError):
+        return False
+    return (host or "").lower() == HOSTED_HOST
+
+
 def noul(instructions, criteria=None):
     """A yes/no judgment. Returns the probability that the statement holds."""
     question = {"type": "noul", "instructions": instructions}
