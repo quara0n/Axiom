@@ -626,3 +626,27 @@ executed, with an empty reply resolving nothing and a genuine finish recorded on
 the role returns its report. The classification of behaviour remains deliberately
 conservative: reading source never confirms and never refutes it, however confident the
 answer.
+
+### ADR-016 — A configured limit is applied or reported, never silently dropped
+
+The provider used to retry without the `reasoning` field when a provider rejected it, with
+the comment "drop the field rather than failing the task". That turned a budget the
+operator set into no budget at all, silently, and we watched the consequence: a Coder that
+burned its whole output allowance on reasoning, and a Planner whose third call ran for
+150 seconds and was cut by the wall clock.
+
+OpenRouter accepts a reasoning budget two ways — a token ceiling and an effort level — and
+models advertise which they support. The provider now sends both, falls back to the effort
+level when a provider refuses the ceiling, remembers which encoding each model accepted,
+and raises a named error when a model will not take a budget in either encoding. It also
+records, per call, what the budget was, which encoding was used, and whether the provider
+reported more reasoning than the budget allowed; the runtime writes a line when it did.
+
+**Why:** A limit that is silently discarded is worse than no limit, because the operator
+believes it is in force. The rule is narrow and checkable: every request carries a budget,
+and the only path without one is an explicit `AXIOM_REASONING_MAX_TOKENS=0`.
+
+**Limits:** We cannot make a provider honour a ceiling it ignores. What we can do is refuse
+to pretend: the call records whether the cap held, and a model that takes no budget is an
+error rather than a silent licence to think for minutes. The wall-clock budget per call
+remains the backstop, and it cuts the call rather than making it faster.

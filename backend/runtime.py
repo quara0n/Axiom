@@ -296,6 +296,8 @@ class Runtime:
             "tool_calls": len((message or {}).get("tool_calls") or []),
             "error": error,
             "requested_limits": (message or {}).get("requested_limits"),
+            "reasoning_limit": (message or {}).get("reasoning_limit"),
+            "reasoning_limit_exceeded": (message or {}).get("reasoning_limit_exceeded"),
             **numbers,
         }
         ledger["calls"].append(entry)
@@ -671,6 +673,13 @@ class Runtime:
             self.record_usage(value, role, label, model, message)
             if not isinstance(message, dict):
                 raise ProviderError("OpenRouter returned an invalid assistant message.")
+            if message.get("reasoning_limit_exceeded"):
+                # The cap was sent and not respected. Worth saying out loud, because it is
+                # the difference between a slow role and a misconfigured one.
+                self.event(value, label,
+                           f"{role} used more reasoning than the "
+                           f"{message['reasoning_limit']}-token cap asked for; {model} did "
+                           "not honour it.")
             calls = message.get("tool_calls") or []
             content = message.get("content")
             if content is not None and not isinstance(content, str):

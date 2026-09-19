@@ -135,6 +135,16 @@ runtime flow rather than only through the module:
   and executed, an empty reply resolves nothing, and a genuine finish is recorded when
   the role actually returns its report.
 
+**The reasoning budget is enforced rather than dropped.** The provider used to retry
+without the `reasoning` field when a provider rejected it, which silently replaced a
+configured ceiling with no ceiling at all. Models advertise both encodings on OpenRouter,
+so a request now carries the token ceiling *and* the matching effort level, falls back to
+effort alone when a provider refuses the ceiling, remembers the encoding per model, and
+raises a named error when a model will take neither. Each call records the budget, the
+encoding and whether the provider reported more reasoning than allowed, and the runtime
+writes an activity line when it did. `AXIOM_REASONING_MAX_TOKENS=0` remains the only way
+to run without a budget. See ADR-016.
+
 Still unimplemented/unmeasured: JEV-driven routing and tool decisions, a calibration
 study on our own labelled tasks, live comparative quality and cost, live subagent
 quality, container isolation/process-tree cancellation, browser interaction checks,

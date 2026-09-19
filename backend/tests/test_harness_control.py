@@ -50,8 +50,14 @@ def test_provider_limits_are_per_call_and_per_model(tmp_path):
         def respond(request):
             payload = json.loads(request.content)
             requests.append(payload)
-            if payload["model"] == "reject/reasoning" and "reasoning" in payload:
-                return httpx.Response(400, json={"error": "reasoning unsupported"})
+            # A provider that refuses the token ceiling but honours the effort level: the
+            # case the fallback exists for. One that refuses both is an error, not a
+            # licence to run unbounded.
+            refused = (payload["model"] == "reject/reasoning"
+                       and isinstance(payload.get("reasoning"), dict)
+                       and "max_tokens" in payload["reasoning"])
+            if refused:
+                return httpx.Response(400, json={"error": "reasoning.max_tokens unsupported"})
             return httpx.Response(200, json={"choices": [{"message": {"content": "OK"},
                                                          "finish_reason": "stop"}]})
 
@@ -64,7 +70,9 @@ def test_provider_limits_are_per_call_and_per_model(tmp_path):
         finally:
             await provider.close()
         assert requests[0]["reasoning"]["max_tokens"] == 2048
-        assert "reasoning" not in requests[1]
+        # A model that refuses the token ceiling gets the other encoding, never no budget:
+        # dropping it silently is how a role ends up reasoning for two and a half minutes.
+        assert requests[1]["reasoning"] == {"effort": "medium"}
         assert requests[2]["max_tokens"] == 8192
         assert requests[2]["reasoning"]["max_tokens"] == 2048
         assert requests[3]["max_tokens"] == 4096
