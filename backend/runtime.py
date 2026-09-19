@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from .provider import ProviderError
 from .coordination import DEFAULT_PROJECT_INSTRUCTIONS, compact_messages, handoff_text, report_tool, read_team_report
 from .control import RepeatGuard, complete_with_limits, trace_tool, route_tools
+from .jev_evidence import collect as collect_jev_evidence
 from .continuation import prepare_continuation
 from .delegation import DELEGATION_NAMES, Delegation, delegation_tools
 from .mcp import McpError
@@ -34,7 +35,11 @@ again when needed. Only Coder owns code changes. Never claim another agent's rep
 is independent test evidence. When the task continues earlier work, that earlier
 code and its reports are already in your workspace: inspect them first and rebuild
 only what is genuinely missing. Keep your final report focused on decisions, changes
-and evidence; a report that restates file contents can be cut off by the output limit."""
+and evidence; a report that restates file contents can be cut off by the output limit.
+The verification record may carry jev_evidence: typed judgements about the task's own
+stated requirements, each with a raw probability. Treat a requirement it marks as
+contradicted as a defect unless you can refute it from the files, and never read a
+probability near 0.5 as a finding either way."""
 
 # Rounds that change the project, not rounds that inspect it. Reading eighteen files of
 # inherited code is diligence, not a runaway loop; the task-wide model-call budget is
@@ -406,6 +411,21 @@ class Runtime:
                                  "execution": {"state": "not_run", "checks": [],
                                                "reason": "Awaiting execution; static failures block launch."}}
         self.event(value, "System", f"Static checks: {len(checks)} files, {len(validation_errors)} failures. Runtime and visuals unverified.")
+        # JEV reads the task's own stated requirements against the files the run wrote.
+        # It is recorded as evidence for the Tester and Reviewer; it never decides the
+        # outcome, and a failure to reach the model is recorded rather than raised.
+        evidence = await collect_jev_evidence(self.settings, value["id"], value["task"],
+                                              workspace.files())
+        if evidence is not None:
+            value["verification"]["jev_evidence"] = evidence
+            if evidence.get("status") == "ran":
+                contradicted = sum(1 for item in evidence["findings"]
+                                   if item["verdict"] == "contradicted")
+                self.event(value, "System",
+                           f"JEV read {len(evidence['findings'])} stated requirements: "
+                           f"{contradicted} contradicted, model {evidence.get('model')}.")
+            elif evidence.get("reason"):
+                self.event(value, "System", f"JEV evidence {evidence['status']}: {evidence['reason']}")
         return {"value": value}
 
     async def execute(self, state: WorkflowState):

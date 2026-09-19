@@ -30,6 +30,10 @@ class Settings:
     jev_model: str = "jev-1.13.0"
     jev_request_timeout: float = 60
     jev_max_attempts: int = 3
+    # Ask JEV whether the finished project satisfies the requirements the task
+    # states. Evidence only: it is recorded for the Tester and Reviewer, and it can
+    # never approve a task or override a deterministic validation failure.
+    jev_evidence: bool = True
     # Running generated code is a real boundary decision, so it is off until the
     # operator turns it on. Discovery of declared checks is always on.
     allow_execution: bool = False
@@ -93,6 +97,8 @@ class Settings:
             jev_model=os.getenv("AXIOM_JEV_MODEL", "jev-1.13.0").strip(),
             jev_request_timeout=max(5, min(float(os.getenv("AXIOM_JEV_REQUEST_TIMEOUT", "60")), 600)),
             jev_max_attempts=max(1, min(int(os.getenv("AXIOM_JEV_MAX_ATTEMPTS", "3")), 8)),
+            jev_evidence=os.getenv("AXIOM_JEV_EVIDENCE", "1").strip().lower()
+            in {"1", "true", "yes", "on"},
             allow_execution=os.getenv("AXIOM_ALLOW_EXECUTION", "").strip().lower()
             in {"1", "true", "yes", "on"},
             execution_timeout=max(5, min(float(os.getenv("AXIOM_EXECUTION_TIMEOUT", "120")), 1800)),

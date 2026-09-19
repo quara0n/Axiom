@@ -47,20 +47,43 @@ Do not claim file contracts are an OS sandbox. Do not replay mutations to recove
 
 ## JEV and remaining work
 
-JEV is still `backend/jev.py`, configuration, offline tests and `scripts/jev_probe.py`;
-it is not connected to the runtime loop. Preserve this existing work. The prior
-handoff recorded 6/6 known-answer hits from a SimpleJev demo, plus confident answers
-without evidence. That is not calibrated TypeSafe-model validation. Details remain
-in `docs/research/2026-09-19-jev-system-one-in-axiom.md`.
+JEV is now connected, narrowly and on purpose. `backend/jev_evidence.py` runs inside
+the `validate` node after the static checks and records its findings as
+`verification.jev_evidence` for the Tester and Reviewer. It takes the requirements the
+task states itself (bullet lines first, then sentences carrying a requirement word,
+capped at eight), sends the files the run wrote as one state (entry point first, 20k
+character budget, truncations and omissions named), and asks one noul question per
+requirement.
 
-Still unimplemented/unmeasured: live comparative quality and cost, live subagent
+Three properties matter for review. It is evidence and never a verdict: it cannot
+approve a task and cannot override a failed check. Only a confident no is a finding:
+below 0.35 is `contradicted`, at or above 0.85 is `supported`, everything else is
+`unclear`, because JEV answers even when the evidence is missing and a value near 0.5
+carries no information. And any failure is recorded as `unavailable` instead of being
+raised, so gathering evidence can never fail a task. Thresholds and the budget are
+module constants, and every finding keeps its raw probability so a calibration pass on
+our own tasks can move them. It runs only when a TypeSafe key is configured and
+`AXIOM_JEV_EVIDENCE` is on, and costs about 8.3k input tokens (~$0.00035) for a
+one-file game.
+
+Measured against the real model (`jev-1.13.0`, live key) on two finished artifacts:
+20/23 on claims plain code can decide, against 22/23 for the free SimpleJev endpoint on
+the same claims. JEV was 2-3x faster and used roughly 30 % fewer input tokens. Both
+were wrong on the two questions that needed the artifact to run, and JEV marked
+requirements `supported` (0.90-0.94) that the Reviewer's hand analysis found real
+defects in. That is why only a confident no counts, and why a JEV answer never outranks
+code. Details and sources: `docs/research/2026-09-19-jev-system-one-in-axiom.md`.
+
+Still unimplemented/unmeasured: JEV-driven routing and tool decisions, a calibration
+study on our own labelled tasks, live comparative quality and cost, live subagent
 quality, container isolation/process-tree cancellation, browser interaction checks,
-JEV shadow evaluation and routing, structured acceptance criteria, durable safe
-checkpoint replay and broader project memory. No frontend changes in this branch.
+structured acceptance criteria, durable safe checkpoint replay and broader project
+memory. No frontend changes in this branch.
 
 ## Verification
 
-- Baseline: 170 passed. Updated: **208 passed**, 38 new regression cases; one
+- Baseline: 170 passed. Updated: **218 passed**, 47 new regression cases (38 from the
+  harness patch, 9 for the JEV evidence pass); one
   existing third-party Starlette deprecation warning.
 - `python -m pytest backend/tests -q` in the project environment. This session used
   `NO_PROXY=127.0.0.1,localhost,::1` for loopback tests behind the environment proxy.
