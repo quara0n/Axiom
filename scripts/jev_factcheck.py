@@ -121,7 +121,9 @@ def kart_excerpts(text):
         "config": lines(text, 37, 45),
         "rules": lines(text, 92, 145),
         "render": lines(text, 146, 200),
-        "selftest": lines(text, 306, 337),
+        # The URL parsing plus the self-test block: the question asks about a URL mode
+        # that writes PASS/FAIL lines, so it needs both halves in one bundle.
+        "selftest": lines(text, 39, 45) + "\n" + lines(text, 306, 337),
     }
 
 
@@ -137,7 +139,8 @@ KART_CLAIMS = [
     ("autostart_hook", "config",
      "Can a race be started from a URL parameter with no player input?",
      lambda text: 'get("autostart")' in text),
-    ("selftest_hook", "config",
+    # The question mentions the PASS/FAIL lines, so its evidence is the selftest block.
+    ("selftest_hook", "selftest",
      "Does the file provide a self-test mode that writes PASS or FAIL lines into the page?",
      lambda text: 'get("selftest")' in text and "PASS" in text),
     ("seeded_only", "config",
