@@ -267,7 +267,7 @@ def create_app(settings=None, provider=None):
         if not pages:
             raise HTTPException(409, "That run wrote no HTML page to open.")
         entry = "index.html" if (workspace / "index.html").is_file() else pages[0]
-        url = request.app.state.preview.select(workspace)
+        url = request.app.state.preview.select(workspace, value["id"])
         return {"url": url + entry, "pages": pages[:20],
                 "note": "Served from this machine on 127.0.0.1. This is generated "
                         "code running in your browser, not a sandbox."}

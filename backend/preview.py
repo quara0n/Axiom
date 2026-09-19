@@ -9,6 +9,15 @@ and not the disk around it. And it listens on its own port, which puts the gener
 page on a different origin from this API: a script inside it cannot read this
 backend's responses, and a JSON POST to it fails the CORS preflight.
 
+Each run gets its own address, `http://127.0.0.1:<port>/<task>/<page>`, because every
+run writes the same few file names. One shared `/index.html` meant the browser could
+answer the next run's address with the previous run's page, and a tab left open on one
+run would silently start serving another. The bare path still serves the run opened
+most recently, for a page that links to itself from the site root.
+
+Pages are served with `Cache-Control: no-store`. Generated projects reuse file names
+like `game.js`, so a cached copy is a copy of the wrong project.
+
 None of that is a sandbox. The page runs in the operator's browser with whatever
 access that browser gives it.
 """
@@ -35,6 +44,22 @@ class _Handler(SimpleHTTPRequestHandler):
         self.send_error(403, "Directory listing is off.")
         return None
 
+    def translate_path(self, path):
+        run, _, rest = path.lstrip("/").partition("/")
+        root = self.server.preview_runs.get(run)
+        if root is None:
+            return super().translate_path(path)
+        self.directory = str(root)
+        return super().translate_path("/" + rest)
+
+    def end_headers(self):
+        # The last run and this one can share every file name in the project, so the
+        # browser has to ask again rather than reuse what it has.
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
 
 class Preview:
     """One loopback static server, pointed at whichever task asked for it."""
@@ -56,18 +81,26 @@ class Preview:
             except OSError:
                 continue
             server.preview_root = Path.cwd()
+            server.preview_runs = {}
             server.daemon_threads = True
             threading.Thread(target=server.serve_forever, daemon=True).start()
             self.server = server
             return
         raise ValueError("No loopback port was free for the preview server.")
 
-    def select(self, root):
-        """Point the server at a workspace and return the address to open."""
+    def select(self, root, run=""):
+        """Serve a workspace and return the address to open it at.
+
+        The address is unique per run: a bare path would make two runs share one URL,
+        so the browser could show one run's page under the other run's link.
+        """
         root = Path(root)
         self._start()
         self.server.preview_root = root
-        return f"http://127.0.0.1:{self.server.server_address[1]}/"
+        if run:
+            self.server.preview_runs[str(run)] = root
+        port = self.server.server_address[1]
+        return f"http://127.0.0.1:{port}/{run}/" if run else f"http://127.0.0.1:{port}/"
 
     def stop(self):
         if self.server is None:

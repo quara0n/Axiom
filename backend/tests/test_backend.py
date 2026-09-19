@@ -409,7 +409,10 @@ def test_the_preview_is_off_until_the_operator_enables_it(tmp_path):
 
 
 def test_the_preview_serves_the_page_the_run_wrote(tmp_path):
-    config = settings(tmp_path, allow_preview=True)
+    # Port 0 keeps the test off the port a running dashboard serves on: on Windows a
+    # second bind of the same address succeeds anyway, and the requests then go to the
+    # server that is already running instead of this one.
+    config = settings(tmp_path, allow_preview=True, preview_port=0)
     with TestClient(create_app(config, MockProvider())) as client:
         task_id = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
         assert wait_task(client, task_id)["status"] == "completed"
@@ -421,11 +424,36 @@ def test_the_preview_serves_the_page_the_run_wrote(tmp_path):
         body = response.json()
         assert body["url"].startswith("http://127.0.0.1:")
         assert body["url"].endswith("/index.html")
+        assert task_id in body["url"]
         assert "not a sandbox" in body["note"]
 
         served = httpx.get(body["url"], timeout=5)
         assert served.status_code == 200
         assert "it runs" in served.text
+        assert "no-store" in served.headers["cache-control"]
+
+
+def test_each_run_gets_its_own_preview_address(tmp_path):
+    """Two runs write the same file names, so one shared URL showed the wrong page."""
+    config = settings(tmp_path, allow_preview=True, preview_port=0)
+    with TestClient(create_app(config, MockProvider())) as client:
+        first = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        assert wait_task(client, first)["status"] == "completed"
+        (config.workspace_root / first / "index.html").write_text(
+            "<h1>first run</h1>\n", encoding="utf-8")
+        second = client.post("/api/tasks", json={"task": "Run"}).json()["id"]
+        assert wait_task(client, second)["status"] == "completed"
+        (config.workspace_root / second / "index.html").write_text(
+            "<h1>second run</h1>\n", encoding="utf-8")
+
+        first_url = client.post(f"/api/tasks/{first}/preview").json()["url"]
+        second_url = client.post(f"/api/tasks/{second}/preview").json()["url"]
+        assert first_url != second_url
+
+        # The second run's address must not answer with the first run's page, which
+        # is what a single shared /index.html did.
+        assert "second run" in httpx.get(second_url, timeout=5).text
+        assert "first run" in httpx.get(first_url, timeout=5).text
 
 
 def test_a_run_with_no_page_to_open_says_so(tmp_path):
