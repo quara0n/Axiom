@@ -5,7 +5,47 @@
 
 ## Current objective
 
-### Review checkpoint (2026-09-17)
+### JEV (TypeSafe System One) — probe wired, not in the loop (2026-09-19)
+
+The user asked whether JEV can make Axiom faster and cheaper, then asked to test it.
+Research and the integration plan are in
+`docs/research/2026-09-19-jev-system-one-in-axiom.md`. JEV is a decision source, not
+another chat model: typed `choice` / `score` / `noul` questions over a state, answers
+and probabilities back, no prose. It is **not** on OpenRouter (0 matching model ids,
+checked 2026-09-19) and needs its own key.
+
+Added, additive, and not yet called by the runtime:
+
+- `backend/jev.py` — `Jev` client plus `noul` / `choice` / `score` helpers. httpx-only,
+  same retry and error policy as `backend/provider.py`. An empty key means "send no
+  Authorization header", which is how a local or free JEV-shaped server is reached.
+- `backend/config.py` — `typesafe_api_key`, `jev_base_url`, `jev_model` (pinned to
+  `jev-1.13.0`, not the moving alias), `jev_request_timeout`, `jev_max_attempts`, with
+  the same precedence as `OPENROUTER_API_KEY`. Empty base URL = unchanged runtime.
+- `scripts/jev_probe.py` — asks one workspace a set of questions whose answers the
+  record already knows, and reports hits, misses and what it refused to score because
+  the evidence was not in the state. Ground truth: `research/VARG-I-HAGEN-HANDOFF.md`.
+- `backend/tests/test_jev.py` — 8 offline tests, mock transport, no key, no network.
+
+Measured 2026-09-19 against the free SimpleJev demo (model
+`featherless-ai/Qwen3.8-27B-classifier`), one request, 8 questions, Varg workspace:
+
+- **6/6** on the scored known-answer set, including the layout question the Reviewer
+  approved while the character was hidden behind the HOPP button (0.76), the
+  recommended `margin-top: auto` fix (0.90) and the "no dependencies" trap (0.04).
+- 4,822 input tokens, 1,356–1,733 ms, 8 answer tokens. At TypeSafe's published
+  $0.042/Mtok that batch is about **$0.0002**, against $2.22 for the whole Varg run.
+- **It does not abstain.** Asked with no supporting evidence in the state it still
+  answered confidently (0.77, 0.87) and picked an option. A JEV gate must therefore
+  guarantee its own evidence; JEV cannot be asked "and see".
+
+SimpleJev is not TypeSafe's model and its values are explicitly not calibrated
+correctness probabilities, so re-run the probe against real JEV before trusting this.
+Nothing in the graph calls JEV, no TypeSafe key exists, and no ADR is recorded yet.
+
+Verification: `.venv\Scripts\python.exe -m pytest backend/tests -q` -> 170 passed.
+
+### Review checkpoint (2026-09-17) — superseded, kept for the record
 
 The current user requested a repository review and concrete bug fixes. Reviewed
 the backend runtime, workspace validation, delegation, persistence, continuation,
@@ -172,11 +212,14 @@ GET http://127.0.0.1:8000/api/health         -> HTTP 200
 
 ## Git state
 
-Branch: `main`
+Branch: `codex/axiom-harness-efficiency`
 
-Last relevant commit: `c6f4a7a fix: a continuation keeps the earlier model plan`
-
-Working tree: clean (`.env` is gitignored and always local).
+Working tree: uncommitted. Three files were already modified before this session and
+are **not** mine — `backend/app.py`, `backend/preview.py`,
+`backend/tests/test_backend.py`. This session added `backend/jev.py`,
+`backend/tests/test_jev.py`, `scripts/jev_probe.py`,
+`docs/research/2026-09-19-jev-system-one-in-axiom.md`, and edited `backend/config.py`
+and this file. `.env` is gitignored and always local.
 
 Consider a checkpoint commit before the next session, per `AGENTS.md`:
 `checkpoint: LangGraph delegation handoff`.
