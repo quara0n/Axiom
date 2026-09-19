@@ -22,6 +22,13 @@ class Settings:
     report_max_tokens: int = 8192
     reasoning_max_tokens: int = 2048
     request_timeout: float = 180
+    # One wall-clock budget for a whole model call, retries and the waits between them
+    # included. Without one, a 180-second read timeout and three attempts let a single
+    # call hold a task for nine minutes with nothing to show for it. 0 disables it.
+    model_call_timeout: float = 240
+    # A Planner that has produced nothing after this long is unlikely to. A shorter
+    # budget lets the run say so instead of leaving the dashboard on a spinner.
+    planner_model_call_timeout: float = 150
     # JEV (TypeSafe System One) answers typed questions with probabilities instead
     # of prose. It is a second provider with its own key and endpoint, and it is
     # optional: an empty base URL means the runtime behaves exactly as before.
@@ -102,6 +109,9 @@ class Settings:
             report_max_tokens=max(1024, min(int(os.getenv("AXIOM_REPORT_MAX_TOKENS", "8192")), 32768)),
             reasoning_max_tokens=max(0, min(int(os.getenv("AXIOM_REASONING_MAX_TOKENS", "2048")), 100000)),
             request_timeout=max(30, min(float(os.getenv("AXIOM_REQUEST_TIMEOUT", "180")), 1800)),
+            model_call_timeout=max(0.0, min(float(os.getenv("AXIOM_MODEL_CALL_TIMEOUT", "240")), 3600)),
+            planner_model_call_timeout=max(
+                0.0, min(float(os.getenv("AXIOM_PLANNER_MODEL_CALL_TIMEOUT", "150")), 3600)),
             typesafe_api_key=os.getenv("TYPESAFE_API_KEY", "").strip(),
             jev_base_url=os.getenv("AXIOM_JEV_BASE_URL", "https://api.typesafe.ai/v1").strip(),
             jev_model=os.getenv("AXIOM_JEV_MODEL", "jev-1.13.0").strip(),

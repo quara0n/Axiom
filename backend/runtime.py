@@ -249,6 +249,18 @@ class Runtime:
         """Each agent can run its own model; the task model is the fallback."""
         return (value.get("models") or {}).get(role) or value["model"]
 
+    def call_budget(self, role):
+        """One wall-clock budget for a whole model call, retries included.
+
+        The provider already retries transient failures, so a per-attempt timeout alone
+        bounds nothing: three attempts of a hung endpoint is three times the wait. The
+        Planner gets a shorter budget because a Planner that has produced nothing after
+        a couple of minutes is not about to. Zero means no budget.
+        """
+        if role == "Planner" and self.settings.planner_model_call_timeout:
+            return self.settings.planner_model_call_timeout
+        return self.settings.model_call_timeout
+
     def record_usage(self, value, role, label, model, message=None, error=None):
         """Record one model call from what the provider reported about it.
 
@@ -596,10 +608,31 @@ class Runtime:
                 messages.append({"role": "user", "content": (
                     "The task is nearing its time limit. Finish the current necessary change, "
                     "then return a concise handoff with unresolved blockers. Do not start new scope.")})
+            budget = self.call_budget(role)
+            call_started = time.monotonic()
             try:
                 turn_tools = route_tools(tools, delegation, value, self.settings)
-                message = await complete_with_limits(self.provider, self.settings, model, messages,
-                                                     turn_tools, role, recovery)
+                # Persist the wait before it happens. The dashboard's last line must not
+                # sit on the previous tool call while a slow model holds the turn.
+                self.event(value, label, f"{role} is waiting for {model}"
+                           + (f" (budget {budget:.0f}s)." if budget else "."))
+                if budget:
+                    async with asyncio.timeout(budget):
+                        message = await complete_with_limits(self.provider, self.settings, model,
+                                                             messages, turn_tools, role, recovery)
+                else:
+                    message = await complete_with_limits(self.provider, self.settings, model,
+                                                         messages, turn_tools, role, recovery)
+            except TimeoutError:
+                waited = round(time.monotonic() - call_started)
+                # A call cut off mid-flight may still have been billed, so it is recorded
+                # as unknown consumption rather than left out of the ledger.
+                self.record_usage(value, role, label, model, error="TimeoutError")
+                self.event(value, label, f"{role} waited {waited}s for {model} and was cut off.")
+                raise ProviderError(
+                    f"{role} waited {waited}s for {model} and was stopped at its "
+                    f"{budget:.0f}s call budget. Raise AXIOM_MODEL_CALL_TIMEOUT, or choose a "
+                    "faster model for this role.") from None
             except ProviderError as exc:
                 # A failed or retried call is part of what the run cost.
                 self.record_usage(value, role, label, model, error=type(exc).__name__)

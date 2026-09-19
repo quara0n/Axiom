@@ -28,6 +28,13 @@ before adding probabilistic routing. No frontier score or live cost gain is clai
   integration and final verification; inherited by continuation. Constrained tasks
   cannot use unconfined MCP or execution. Prose constraints remain advisory.
 - Fresh verification parsing; cached inspection has hash/version/time provenance.
+- A model call now has one wall-clock budget covering its retries, so three attempts of
+  a hung endpoint can no longer hold a task for three times the wait; the Planner gets a
+  shorter budget of its own. The wait is written to the activity record before the
+  request is sent, so the dashboard no longer sits on the previous tool call while a slow
+  model holds the turn, and a call cut off mid-flight is recorded as unknown consumption
+  instead of disappearing from the ledger. Known limitation: the wait line is a single
+  event, not a live counter of elapsed seconds and attempt number.
   Bounded per-tool timing/outcome/argument-digest traces and monotonic usage IDs.
 - Benchmark cost/tokens per solve include failed attempts. Incomplete usage is
   reported as unavailable instead of an artificially low complete total.
